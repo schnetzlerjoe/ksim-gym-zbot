@@ -28,6 +28,12 @@ git clone git@github.com:<YOUR USERNAME>/kscale-humanoid-benchmark.git
 cd kscale-humanoid-benchmark
 ```
 
+4.1 Init the submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
 5. Create a new Python environment (we require Python 3.11 or later)
 6. Install the package with its dependencies:
 
