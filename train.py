@@ -23,6 +23,8 @@ from ksim.types import PhysicsData
 from mujoco import mjx
 from mujoco_scenes.mjcf import load_mjmodel
 
+from ksim.utils.mujoco import get_ctrl_data_idx_by_name, log_joint_config
+
 logger = logging.getLogger(__name__)
 
 NUM_JOINTS = 20
@@ -579,104 +581,105 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
         return mj_model
 
-    def log_joint_config(self, model: Union[mujoco.MjModel, mjx.Model]) -> None:
-        metadata = self.get_mujoco_model_metadata(model)
-        debug_lines = ["==== Joint and Actuator Properties ===="]
+    # def log_joint_config(self, model: Union[mujoco.MjModel, mjx.Model]) -> None:
+    #     metadata = self.get_mujoco_model_metadata(model)
+    #     debug_lines = ["==== Joint and Actuator Properties ===="]
 
-        if isinstance(model, mujoco.MjModel):
-            logger.info("******** PhysicsModel is Mujoco")
+    #     if isinstance(model, mujoco.MjModel):
+    #         logger.info("******** PhysicsModel is Mujoco")
 
-            njnt = model.njnt
+    #         njnt = model.njnt
 
-            def get_joint_name(idx: int) -> Optional[str]:
-                return mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, idx)
+    #         def get_joint_name(idx: int) -> Optional[str]:
+    #             return mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, idx)
 
-            def get_actuator_id(name: str) -> int:
-                return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+    #         def get_actuator_id(name: str) -> int:
+    #             return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
 
-            dof_damping = model.dof_damping
-            dof_armature = model.dof_armature
-            dof_frictionloss = model.dof_frictionloss
-            jnt_dofadr = model.jnt_dofadr
-            actuator_forcerange = model.actuator_forcerange
+    #         dof_damping = model.dof_damping
+    #         dof_armature = model.dof_armature
+    #         dof_frictionloss = model.dof_frictionloss
+    #         jnt_dofadr = model.jnt_dofadr
+    #         actuator_forcerange = model.actuator_forcerange
 
-        elif isinstance(model, mjx.Model):
-            logger.info("******** PhysicsModel is MJX")
+    #     elif isinstance(model, mjx.Model):
+    #         logger.info("******** PhysicsModel is MJX")
 
-            njnt = model.njnt
-            dof_damping = model.dof_damping
-            dof_armature = model.dof_armature
-            dof_frictionloss = model.dof_frictionloss
-            jnt_dofadr = model.jnt_dofadr
-            actuator_forcerange = model.actuator_forcerange
+    #         njnt = model.njnt
+    #         dof_damping = model.dof_damping
+    #         dof_armature = model.dof_armature
+    #         dof_frictionloss = model.dof_frictionloss
+    #         jnt_dofadr = model.jnt_dofadr
+    #         actuator_forcerange = model.actuator_forcerange
 
-            def extract_name(byte_array: bytes, adr_array: Sequence[int], idx: int) -> Optional[str]:
-                adr = adr_array[idx]
-                if adr < 0:
-                    return None
-                end = byte_array.find(b"\x00", adr)
-                return byte_array[adr:end].decode("utf-8")
+    #         def extract_name(byte_array: bytes, adr_array: Sequence[int], idx: int) -> Optional[str]:
+    #             adr = adr_array[idx]
+    #             if adr < 0:
+    #                 return None
+    #             end = byte_array.find(b"\x00", adr)
+    #             return byte_array[adr:end].decode("utf-8")
 
-            actuator_name_to_id = {
-                extract_name(model.names, model.name_actuatoradr, i): i
-                for i in range(model.nu)
-                if model.name_actuatoradr[i] >= 0
-            }
+    #         actuator_name_to_id = {
+    #             extract_name(model.names, model.name_actuatoradr, i): i
+    #             for i in range(model.nu)
+    #             if model.name_actuatoradr[i] >= 0
+    #         }
 
-            def get_joint_name(idx: int) -> Optional[str]:
-                return extract_name(model.names, model.name_jntadr, idx)
+    #         def get_joint_name(idx: int) -> Optional[str]:
+    #             return extract_name(model.names, model.name_jntadr, idx)
 
-            def get_actuator_id(name: str) -> int:
-                return actuator_name_to_id.get(name, -1)
+    #         def get_actuator_id(name: str) -> int:
+    #             return actuator_name_to_id.get(name, -1)
 
-        else:
-            raise TypeError("Unsupported model type provided")
+    #     else:
+    #         raise TypeError("Unsupported model type provided")
 
-        for i in range(njnt):
-            joint_name = get_joint_name(i)
-            if joint_name is None:
-                continue
+    #     for i in range(njnt):
+    #         joint_name = get_joint_name(i)
+    #         if joint_name is None:
+    #             continue
 
-            joint_meta = metadata.get(joint_name)
-            if not joint_meta:
-                logger.warning("Joint '%s' missing metadata; skipping.", joint_name)
-                continue
+    #         joint_meta = metadata.get(joint_name)
+    #         if not joint_meta:
+    #             logger.warning("Joint '%s' missing metadata; skipping.", joint_name)
+    #             continue
 
-            actuator_type = joint_meta.actuator_type
-            if actuator_type is None:
-                logger.warning("Joint '%s' missing actuator_type; skipping.", joint_name)
-                continue
+    #         actuator_type = joint_meta.actuator_type
+    #         if actuator_type is None:
+    #             logger.warning("Joint '%s' missing actuator_type; skipping.", joint_name)
+    #             continue
 
-            dof_id = jnt_dofadr[i]
-            damping = dof_damping[dof_id]
-            armature = dof_armature[dof_id]
-            frictionloss = dof_frictionloss[dof_id]
-            joint_id = joint_meta.id if joint_meta.id is not None else "N/A"
-            kp = joint_meta.kp if joint_meta.kp is not None else "N/A"
-            kd = joint_meta.kd if joint_meta.kd is not None else "N/A"
+    #         dof_id = jnt_dofadr[i]
+    #         damping = dof_damping[dof_id]
+    #         armature = dof_armature[dof_id]
+    #         frictionloss = dof_frictionloss[dof_id]
+    #         joint_id = joint_meta.id if joint_meta.id is not None else "N/A"
+    #         kp = joint_meta.kp if joint_meta.kp is not None else "N/A"
+    #         kd = joint_meta.kd if joint_meta.kd is not None else "N/A"
 
-            actuator_name = f"{joint_name}_ctrl"
-            actuator_id = get_actuator_id(actuator_name)
+    #         actuator_name = f"{joint_name}_ctrl"
+    #         actuator_id = get_actuator_id(actuator_name)
 
-            line = (
-                f"Joint: {joint_name:<20} | Joint ID: {joint_id!s:<3} | "
-                f"Damping: {damping:6.3f} | Armature: {armature:6.3f} | "
-                f"Friction: {frictionloss:6.3f}"
-            )
+    #         line = (
+    #             f"Joint: {joint_name:<20} | Joint ID: {joint_id!s:<3} | "
+    #             f"Damping: {damping:6.3f} | Armature: {armature:6.3f} | "
+    #             f"Friction: {frictionloss:6.3f}"
+    #         )
 
-            if actuator_id >= 0:
-                forcerange = actuator_forcerange[actuator_id]
-                line += (
-                    f" | Actuator: {actuator_name:<20} (ID: {actuator_id:2d}) | "
-                    f"Forcerange: [{forcerange[0]:6.3f}, {forcerange[1]:6.3f}] | "
-                    f"Kp: {kp} | Kd: {kd}"
-                )
-            else:
-                line += " | Actuator: N/A (passive joint)"
+    #         if actuator_id >= 0:
+    #             forcerange = actuator_forcerange[actuator_id]
+    #             line += (
+    #                 f" | Actuator: {actuator_name:<20} (ID: {actuator_id:2d}) | "
+    #                 f"Forcerange: [{forcerange[0]:6.3f}, {forcerange[1]:6.3f}] | "
+    #                 f"Kp: {kp} | Kd: {kd}"
+    #             )
+    #         else:
+    #             line += " | Actuator: N/A (passive joint)"
 
-            debug_lines.append(line)
+    #         debug_lines.append(line)
 
-        logger.info("\n".join(debug_lines))
+    #     logger.info("\n".join(debug_lines))
+    
 
     def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> dict[str, JointMetadataOutput]:
         """Get joint metadata from metadata.json file."""
@@ -763,7 +766,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             kp_j = kp_j.at[i].set(float(joint_metadata.kp))
             kd_j = kd_j.at[i].set(float(joint_metadata.kd))
 
-        self.log_joint_config(physics_model)
+        # self.log_joint_config(physics_model)
+        log_joint_config(physics_model, metadata)
 
         return FeetechActuators(
             max_torque_j=max_torque_j,
@@ -867,10 +871,10 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
             ksim.BadZTermination(unhealthy_z_lower=0.05, unhealthy_z_upper=0.5),
-            ksim.PitchTooGreatTermination(max_pitch=math.radians(30)),
-            ksim.RollTooGreatTermination(max_roll=math.radians(30)),
-            ksim.HighVelocityTermination(),
-            ksim.FarFromOriginTermination(max_dist=10.0),
+            # ksim.PitchTooGreatTermination(max_pitch=math.radians(30)),
+            # ksim.RollTooGreatTermination(max_roll=math.radians(30)),
+            # ksim.HighVelocityTermination(),
+            # ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
