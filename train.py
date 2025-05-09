@@ -1,5 +1,6 @@
 """Defines simple task for training a walking policy for the default humanoid."""
 
+import asyncio
 import json
 import logging
 import math
@@ -15,9 +16,11 @@ import jax.numpy as jnp
 import ksim
 import mujoco
 import optax
+import mujoco_scenes
+import mujoco_scenes.mjcf
 import xax
 from jaxtyping import Array, PRNGKeyArray
-from kscale.web.gen.api import JointMetadataOutput
+from kscale.web.gen.api import JointMetadataOutput, ActuatorMetadataOutput, RobotURDFMetadataOutput
 from ksim.actuators import NoiseType, StatefulActuators
 from ksim.types import PhysicsData
 from mujoco import mjx
@@ -62,48 +65,6 @@ class PlannerState:
     position: Array
     velocity: Array
 
-
-@attrs.define(frozen=True, kw_only=True)
-class BentArmPenalty(ksim.Reward):
-    arm_indices: tuple[int, ...] = attrs.field()
-    arm_targets: tuple[float, ...] = attrs.field()
-
-    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
-        qpos = trajectory.qpos[..., self.arm_indices]
-        qpos_targets = jnp.array(self.arm_targets)
-        qpos_diff = qpos - qpos_targets
-        return xax.get_norm(qpos_diff, "l1").mean(axis=-1)
-
-    @classmethod
-    def create(
-        cls,
-        model: ksim.PhysicsModel,
-        scale: float,
-        scale_by_curriculum: bool = False,
-    ) -> Self:
-        qpos_mapping = ksim.get_qpos_data_idxs_by_name(model)
-
-        names = [
-            "right_shoulder_pitch",
-            "right_shoulder_roll",
-            "right_elbow_roll",
-            "right_gripper_roll",
-            "left_shoulder_pitch",
-            "left_shoulder_roll",
-            "left_elbow_roll",
-            "left_gripper_roll",
-        ]
-
-        zeros = {k: v for k, v in ZEROS}
-        arm_indices = [qpos_mapping[name][0] for name in names]
-        arm_targets = [zeros[name] for name in names]
-
-        return cls(
-            arm_indices=tuple(arm_indices),
-            arm_targets=tuple(arm_targets),
-            scale=scale,
-            scale_by_curriculum=scale_by_curriculum,
-        )
 
 
 class Actor(eqx.Module):
@@ -270,7 +231,7 @@ class Model(eqx.Module):
             num_outputs=num_outputs,
             min_std=min_std,
             max_std=max_std,
-            var_scale=0.5,
+            var_scale=1.0,
             hidden_size=hidden_size,
             num_mixtures=num_mixtures,
             depth=depth,
@@ -286,16 +247,6 @@ class Model(eqx.Module):
 class ZbotWalkingTaskConfig(ksim.PPOConfig):
     """Config for the Z-Bot walking task."""
 
-    robot_mjcf_path: str = xax.field(
-        value="kscale-assets/zbot-6dof-feet/",
-        help="The path to the assets directory for the robot.",
-    )
-
-    actuator_params_path: str = xax.field(
-        value="kscale-assets/actuators/",
-        help="The path to the assets directory for actuator models",
-    )
-
     # Model parameters.
     hidden_size: int = xax.field(
         value=128,
@@ -308,10 +259,6 @@ class ZbotWalkingTaskConfig(ksim.PPOConfig):
     num_mixtures: int = xax.field(
         value=5,
         help="The number of mixtures for the actor.",
-    )
-    scale: float = xax.field(
-        value=0.1,
-        help="The maximum position delta on each step, in radians.",
     )
 
     # Optimizer parameters.
@@ -326,28 +273,6 @@ class ZbotWalkingTaskConfig(ksim.PPOConfig):
     adam_weight_decay: float = xax.field(
         value=1e-5,
         help="Weight decay for the Adam optimizer.",
-    )
-
-    # Curriculum parameters.
-    num_curriculum_levels: int = xax.field(
-        value=10,
-        help="The number of curriculum levels to use.",
-    )
-    increase_threshold: float = xax.field(
-        value=3.0,
-        help="Increase the curriculum level when the mean trajectory length is above this threshold.",
-    )
-    decrease_threshold: float = xax.field(
-        value=1.0,
-        help="Decrease the curriculum level when the mean trajectory length is below this threshold.",
-    )
-    min_level_steps: int = xax.field(
-        value=50,
-        help="The minimum number of steps to wait before changing the curriculum level.",
-    )
-    min_curriculum_level: float = xax.field(
-        value=0.0,
-        help="The minimum curriculum level to use.",
     )
 
     # Rendering parameters.
@@ -401,16 +326,6 @@ def trapezoidal_step(
     new_state = PlannerState(position=new_position, velocity=new_velocity)
 
     return new_state, (new_position, new_velocity)
-
-
-def load_actuator_params(params_path: str, actuator_type: str) -> FeetechParams:
-    params_file = Path(params_path) / f"{actuator_type}.json"
-    if not params_file.exists():
-        raise ValueError(
-            f"Actuator parameters file '{params_file}' not found. Please ensure it exists in '{params_path}'."
-        )
-    with open(params_file, "r") as f:
-        return json.load(f)
 
 
 class FeetechActuators(StatefulActuators):
@@ -511,287 +426,111 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         )
 
         return optimizer
-
-    def _configure_actuator_params(
-        self,
-        mj_model: mujoco.MjModel,
-        dof_id: int,
-        joint_name: str,
-        params: FeetechParams,
-    ) -> None:
-        """Configure actuator parameters for a joint."""
-        mj_model.dof_damping[dof_id] = params["damping"]
-        mj_model.dof_armature[dof_id] = params["armature"]
-        mj_model.dof_frictionloss[dof_id] = params["frictionloss"]
-
-        # breakpoint()
-        actuator_name = f"{joint_name}_ctrl"
-        actuator_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
-        if actuator_id >= 0:
-            # Set force limits flag on the joint (using joint index) rather than actuator index
-            joint_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
-            if joint_id >= 0:
-                mj_model.jnt_actfrclimited[joint_id] = 1
-            max_torque = float(params["max_torque"])
-            mj_model.actuator_forcerange[actuator_id, :] = [-max_torque, max_torque]
-
+    
     def get_mujoco_model(self) -> mujoco.MjModel:
-        mjcf_path = (Path(self.config.robot_mjcf_path) / "robot.mjcf").resolve().as_posix()
-        logger.info("Loading MJCF model from %s", mjcf_path)
-        mj_model = load_mjmodel(mjcf_path, scene="smooth")
-
-        metadata = self.get_mujoco_model_metadata(mj_model)
-
-        mj_model.opt.timestep = jnp.array(self.config.dt)
-        mj_model.opt.iterations = 6
-        mj_model.opt.ls_iterations = 6
-        mj_model.opt.disableflags = mjx.DisableBit.EULERDAMP
-        mj_model.opt.solver = mjx.SolverType.CG
-
-        # Validate parameters
-        required_keys = ["damping", "armature", "frictionloss", "max_torque"]
-
-        # Apply servo-specific parameters based on joint metadata
-        for i in range(mj_model.njnt):
-            joint_name = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_JOINT, i)
-            if joint_name is None:
-                logger.warning("Joint at index %d has no name; skipping parameter assignment.", i)
-                continue
-
-            # Look up joint metadata. Warn if actuator_type is missing.
-            if joint_name not in metadata:
-                logger.warning("Joint '%s' is missing; skipping parameter assignment.", joint_name)
-                continue
-
-            joint_meta = metadata[joint_name]
-            if joint_meta.actuator_type is None:
-                logger.warning("Joint '%s' is missing an actuator_type; skipping parameter assignment.", joint_name)
-                continue
-
-            dof_id = mj_model.jnt_dofadr[i]
-
-            # Load and validate parameters for this actuator type
-            params = load_actuator_params(self.config.actuator_params_path, joint_meta.actuator_type)
-            for key in required_keys:
-                if key not in params:
-                    raise ValueError(f"Missing required key '{key}' in {joint_meta.actuator_type} parameters.")
-
-            # Apply parameters based on the joint suffix
-            self._configure_actuator_params(mj_model, dof_id, joint_name, params)
-
-        return mj_model
-
-    # def log_joint_config(self, model: Union[mujoco.MjModel, mjx.Model]) -> None:
-    #     metadata = self.get_mujoco_model_metadata(model)
-    #     debug_lines = ["==== Joint and Actuator Properties ===="]
-
-    #     if isinstance(model, mujoco.MjModel):
-    #         logger.info("******** PhysicsModel is Mujoco")
-
-    #         njnt = model.njnt
-
-    #         def get_joint_name(idx: int) -> Optional[str]:
-    #             return mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, idx)
-
-    #         def get_actuator_id(name: str) -> int:
-    #             return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-
-    #         dof_damping = model.dof_damping
-    #         dof_armature = model.dof_armature
-    #         dof_frictionloss = model.dof_frictionloss
-    #         jnt_dofadr = model.jnt_dofadr
-    #         actuator_forcerange = model.actuator_forcerange
-
-    #     elif isinstance(model, mjx.Model):
-    #         logger.info("******** PhysicsModel is MJX")
-
-    #         njnt = model.njnt
-    #         dof_damping = model.dof_damping
-    #         dof_armature = model.dof_armature
-    #         dof_frictionloss = model.dof_frictionloss
-    #         jnt_dofadr = model.jnt_dofadr
-    #         actuator_forcerange = model.actuator_forcerange
-
-    #         def extract_name(byte_array: bytes, adr_array: Sequence[int], idx: int) -> Optional[str]:
-    #             adr = adr_array[idx]
-    #             if adr < 0:
-    #                 return None
-    #             end = byte_array.find(b"\x00", adr)
-    #             return byte_array[adr:end].decode("utf-8")
-
-    #         actuator_name_to_id = {
-    #             extract_name(model.names, model.name_actuatoradr, i): i
-    #             for i in range(model.nu)
-    #             if model.name_actuatoradr[i] >= 0
-    #         }
-
-    #         def get_joint_name(idx: int) -> Optional[str]:
-    #             return extract_name(model.names, model.name_jntadr, idx)
-
-    #         def get_actuator_id(name: str) -> int:
-    #             return actuator_name_to_id.get(name, -1)
-
-    #     else:
-    #         raise TypeError("Unsupported model type provided")
-
-    #     for i in range(njnt):
-    #         joint_name = get_joint_name(i)
-    #         if joint_name is None:
-    #             continue
-
-    #         joint_meta = metadata.get(joint_name)
-    #         if not joint_meta:
-    #             logger.warning("Joint '%s' missing metadata; skipping.", joint_name)
-    #             continue
-
-    #         actuator_type = joint_meta.actuator_type
-    #         if actuator_type is None:
-    #             logger.warning("Joint '%s' missing actuator_type; skipping.", joint_name)
-    #             continue
-
-    #         dof_id = jnt_dofadr[i]
-    #         damping = dof_damping[dof_id]
-    #         armature = dof_armature[dof_id]
-    #         frictionloss = dof_frictionloss[dof_id]
-    #         joint_id = joint_meta.id if joint_meta.id is not None else "N/A"
-    #         kp = joint_meta.kp if joint_meta.kp is not None else "N/A"
-    #         kd = joint_meta.kd if joint_meta.kd is not None else "N/A"
-
-    #         actuator_name = f"{joint_name}_ctrl"
-    #         actuator_id = get_actuator_id(actuator_name)
-
-    #         line = (
-    #             f"Joint: {joint_name:<20} | Joint ID: {joint_id!s:<3} | "
-    #             f"Damping: {damping:6.3f} | Armature: {armature:6.3f} | "
-    #             f"Friction: {frictionloss:6.3f}"
-    #         )
-
-    #         if actuator_id >= 0:
-    #             forcerange = actuator_forcerange[actuator_id]
-    #             line += (
-    #                 f" | Actuator: {actuator_name:<20} (ID: {actuator_id:2d}) | "
-    #                 f"Forcerange: [{forcerange[0]:6.3f}, {forcerange[1]:6.3f}] | "
-    #                 f"Kp: {kp} | Kd: {kd}"
-    #             )
-    #         else:
-    #             line += " | Actuator: N/A (passive joint)"
-
-    #         debug_lines.append(line)
-
-    #     logger.info("\n".join(debug_lines))
+        mjcf_path = asyncio.run(ksim.get_mujoco_model_path("zbot", name="robot"))
+        return mujoco_scenes.mjcf.load_mjmodel(mjcf_path, scene="smooth")
     
 
-    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> dict[str, JointMetadataOutput]:
-        """Get joint metadata from metadata.json file."""
-        metadata_path = Path(self.config.robot_mjcf_path) / "metadata.json"
-        if not metadata_path.exists():
-            raise FileNotFoundError(f"Metadata file not found at {metadata_path}")
-        try:
-            with open(metadata_path, "r") as f:
-                raw_metadata = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Error decoding JSON from {metadata_path}: {e}")
+    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> RobotURDFMetadataOutput:
+        metadata = asyncio.run(ksim.get_mujoco_model_metadata("zbot"))
+        if metadata.joint_name_to_metadata is None:
+            raise ValueError("Joint metadata is not available")
+        if metadata.actuator_type_to_metadata is None:
+            raise ValueError("Actuator metadata is not available")
+        return metadata
 
-        if "joint_name_to_metadata" not in raw_metadata:
-            raise ValueError(f"'joint_name_to_metadata' key missing in {metadata_path}")
 
-        joint_metadata = raw_metadata["joint_name_to_metadata"]
-        if not isinstance(joint_metadata, dict):
-            raise TypeError(f"'joint_name_to_metadata' in {metadata_path} must be a dictionary.")
 
-        # Convert raw metadata to JointMetadataOutput objects
-        return {joint_name: JointMetadataOutput(**metadata) for joint_name, metadata in joint_metadata.items()}
 
     def get_actuators(
         self,
         physics_model: ksim.PhysicsModel,
-        metadata: dict[str, JointMetadataOutput] | None = None,
-    ) -> ksim.Actuators:
+        metadata: RobotURDFMetadataOutput | None = None,
+    ) -> FeetechActuators:
+        
+        VMAX = 5.0   # rad · s⁻¹ fallback
+        AMAX = 39.0
+
         if metadata is None:
-            raise ValueError("Metadata is required to get actuators")
+            raise ValueError("metadata must be provided")
 
-        self.joint_mappings = self.create_joint_mappings(physics_model, metadata)
+        joint_meta = metadata.joint_name_to_metadata
+        actuator_meta = metadata.actuator_type_to_metadata
 
-        num_joints = len(self.joint_mappings)
+        ctrl_indices = get_ctrl_data_idx_by_name(physics_model)  # {actuator_name: idx}
+        joint_order = sorted(ctrl_indices.keys(), key=lambda x: ctrl_indices[x])
+        
+        for actuator_name in joint_order:
+            joint_name = actuator_name.split("_ctrl")[0]
+            if joint_name not in joint_meta:
+                raise ValueError(f"Joint '{joint_name}' not found in metadata")
+            meta_nn_id = joint_meta[joint_name].nn_id
+            # if meta_nn_id != ctrl_indices[actuator_name]:
+            #     raise ValueError(f"Metadata nn_id for '{joint_name}' ({meta_nn_id})"
+            #                      f"!= simulator index {ctrl_indices[actuator_name]}")
 
-        max_torque_j = jnp.zeros(num_joints)
-        max_velocity_j = jnp.zeros(num_joints)
-        max_pwm_j = jnp.zeros(num_joints)
-        vin_j = jnp.zeros(num_joints)
-        kt_j = jnp.zeros(num_joints)
-        r_j = jnp.zeros(num_joints)
-        # vmax_j = jnp.zeros(num_joints)
-        # amax_j = jnp.zeros(num_joints)
-        vmax_j = jnp.ones(num_joints) * 5.0  # or whatever test value you want
-        amax_j = jnp.ones(num_joints) * 39.0
-        kp_j = jnp.zeros(num_joints)
-        kd_j = jnp.zeros(num_joints)
-        error_gain_j = jnp.zeros(num_joints)
+        def param(joint: str, field: str, *, default: float | None = None) -> float:
+            value = getattr(actuator_meta[joint_meta[joint].actuator_type], field)
+            if value is None:
+                if default is None:
+                    raise ValueError(f"Parameter '{field}' missing for joint '{joint}'")
+                return default
+            return float(value)
 
-        # Validate parameters
-        required_keys = ["max_torque", "error_gain", "max_velocity", "max_pwm", "vin", "kt", "R"]
 
-        # Sort joint_mappings by actuator_id to ensure correct ordering
-        sorted_joints = sorted(self.joint_mappings.items(), key=lambda x: x[1]["actuator_id"])
+        max_torque = []
+        max_vel = []
+        max_pwm = []
+        vin = []
+        kt = []
+        r = []
+        vmax = []
+        amax = []
+        err_gain = []
+        kp = []
+        kd = []
 
-        for i, (joint_name, mapping) in enumerate(sorted_joints):
-            joint_metadata = metadata[joint_name]
-            if not isinstance(joint_metadata, JointMetadataOutput):
-                raise TypeError(f"Metadata entry for joint '{joint_name}' must be a JointMetadataOutput.")
+        for joint in joint_order:
+            name = joint.split("_ctrl")[0]
+            max_torque.append(param(name, "max_torque"))
+            max_vel.append(param(name, "max_velocity"))
+            max_pwm.append(param(name, "max_pwm"))
+            vin.append(param(name, "vin"))
+            kt.append(param(name, "kt"))
+            r.append(param(name, "R"))
+            vmax.append(param(name, "vmax", default=VMAX))
+            amax.append(param(name, "amax", default=AMAX))
+            err_gain.append(param(name, "error_gain"))
+            kp.append(float(joint_meta[name].kp))
+            kd.append(float(joint_meta[name].kd))
 
-            actuator_type = cast(str, joint_metadata.actuator_type)
-            if actuator_type is None:
-                raise ValueError(f"'actuator_type' is not available for joint {joint_name}")
-            if not isinstance(actuator_type, str):
-                raise TypeError(f"'actuator_type' for joint {joint_name} must be a string.")
-
-            params = load_actuator_params(self.config.actuator_params_path, actuator_type)
-
-            # Validate parameters
-            for key in required_keys:
-                if key not in params:
-                    raise ValueError(f"Missing required key '{key}' in {actuator_type} parameters.")
-
-            max_torque_j = max_torque_j.at[i].set(params["max_torque"])
-            max_velocity_j = max_velocity_j.at[i].set(params["max_velocity"])
-            max_pwm_j = max_pwm_j.at[i].set(params["max_pwm"])
-            vin_j = vin_j.at[i].set(params["vin"])
-            kt_j = kt_j.at[i].set(params["kt"])
-            r_j = r_j.at[i].set(params["R"])
-            error_gain_j = error_gain_j.at[i].set(params["error_gain"])
-
-            # Set kp and kd values
-            if joint_metadata.kp is None or joint_metadata.kd is None:
-                raise ValueError(f"kp/kd values for joint {joint_name} are not available")
-            kp_j = kp_j.at[i].set(float(joint_metadata.kp))
-            kd_j = kd_j.at[i].set(float(joint_metadata.kd))
-
-        # self.log_joint_config(physics_model)
-        log_joint_config(physics_model, metadata)
-
+        # ------------------------------------------------------------------
+        # 4. Instantiate controller (lists → jnp.array on‑the‑fly)
+        # ------------------------------------------------------------------
         return FeetechActuators(
-            max_torque_j=max_torque_j,
-            max_velocity_j=max_velocity_j,
-            max_pwm_j=max_pwm_j,
-            vin_j=vin_j,
-            kt_j=kt_j,
-            r_j=r_j,
-            kp_j=kp_j,
-            kd_j=kd_j,
-            vmax_j=vmax_j,
-            amax_j=amax_j,
+            max_torque_j=jnp.array(max_torque),
+            kp_j=jnp.array(kp),
+            kd_j=jnp.array(kd),
+            max_velocity_j=jnp.array(max_vel),
+            max_pwm_j=jnp.array(max_pwm),
+            vin_j=jnp.array(vin),
+            kt_j=jnp.array(kt),
+            r_j=jnp.array(r),
+            vmax_j=jnp.array(vmax),
+            amax_j=jnp.array(amax),
+            error_gain_j=jnp.array(err_gain),
             dt=self.config.dt,
-            error_gain_j=error_gain_j,
             action_noise=0.0,
             action_noise_type="none",
             torque_noise=0.0,
             torque_noise_type="none",
         )
 
+
     def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
         return [
             ksim.StaticFrictionRandomizer(),
-            ksim.FloorFrictionRandomizer.from_geom_name(physics_model, "floor", scale_lower=0.8, scale_upper=1.2),
             ksim.ArmatureRandomizer(),
             ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.05),
             ksim.JointDampingRandomizer(),
@@ -804,6 +543,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 x_force=1.5,
                 y_force=1.5,
                 z_force=0.1,
+                force_range=(0.1, 0.3),
                 x_angular_force=0.1,
                 y_angular_force=0.1,
                 z_angular_force=0.3,
@@ -815,12 +555,14 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return [
             ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
             ksim.RandomJointVelocityReset(),
+            ksim.RandomHeadingReset(),
+
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
         return [
-            ksim.JointPositionObservation(),
-            ksim.JointVelocityObservation(),
+            ksim.JointPositionObservation(noise=math.radians(2)),
+            ksim.JointVelocityObservation(noise=math.radians(10)),
             ksim.ActuatorForceObservation(),
             ksim.CenterOfMassInertiaObservation(),
             ksim.CenterOfMassVelocityObservation(),
@@ -832,8 +574,9 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.BaseAngularAccelerationObservation(),
             ksim.ProjectedGravityObservation.create(
                 physics_model=physics_model,
-                framequat_name="base_link_quat",
-                lag_range=(0.0, 0.5),
+                framequat_name="BNO_055_site_quat", # change to imu
+                lag_range=(0.0, 0.1),
+                noise=math.radians(1),
             ),
             ksim.ActuatorAccelerationObservation(),
             ksim.BasePositionObservation(),
@@ -841,8 +584,16 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.BaseLinearVelocityObservation(),
             ksim.BaseAngularVelocityObservation(),
             ksim.CenterOfMassVelocityObservation(),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="imu_acc"),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="imu_gyro"),
+            ksim.SensorObservation.create(
+                physics_model=physics_model,
+                sensor_name="BNO_055_acc",
+                noise=1.0,
+            ),
+            ksim.SensorObservation.create(
+                physics_model=physics_model,
+                sensor_name="BNO_055_gyro",
+                noise=math.radians(10),
+            ),
         ]
 
     def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
@@ -852,20 +603,20 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return [
             # Standard rewards.
             ksim.StayAliveReward(scale=1.0),
-            ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
-            ksim.UprightReward(index="x", inverted=False, scale=0.1),
+            ksim.UprightReward(scale=1.0),
+            # # Avoid movement penalties.
+            # ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
+            # ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
             # # Normalization penalties.
             # ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
+            # ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
+            # ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
+            # ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
             # ksim.ActionSmoothnessPenalty(scale=-0.01),
-            # ksim.ActuatorJerkPenalty(ctrl_dt=self.config.ctrl_dt, scale=-0.001),
-            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.001),
-            # ksim.AngularVelocityPenalty(index="x", scale=-0.0005),
-            # ksim.AngularVelocityPenalty(index="y", scale=-0.0005),
-            # ksim.AngularVelocityPenalty(index="z", scale=-0.0005),
-            # ksim.LinearVelocityPenalty(index="y", scale=-0.0005),
-            # ksim.LinearVelocityPenalty(index="z", scale=-0.0005),
+            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
             # # Bespoke rewards.
-            # BentArmPenalty.create(physics_model, scale=-0.01),
+            # BentArmPenalty.create_penalty(physics_model, scale=-0.1),
+            # StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
         ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
@@ -878,13 +629,9 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
-        return ksim.EpisodeLengthCurriculum(
-            num_levels=self.config.num_curriculum_levels,
-            increase_threshold=self.config.increase_threshold,
-            decrease_threshold=self.config.decrease_threshold,
-            min_level_steps=self.config.min_level_steps,
-            dt=self.config.ctrl_dt,
-            min_level=self.config.min_curriculum_level,
+        return ksim.LinearCurriculum(
+            step_size=0.01,
+            step_every_n_epochs=10,
         )
 
     def get_model(self, key: PRNGKeyArray) -> Model:
@@ -934,8 +681,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         dh_joint_vel_j = observations["joint_velocity_observation"]
         com_inertia_n = observations["center_of_mass_inertia_observation"]
         com_vel_n = observations["center_of_mass_velocity_observation"]
-        imu_acc_3 = observations["sensor_observation_imu_acc"]
-        imu_gyro_3 = observations["sensor_observation_imu_gyro"]
+        imu_acc_3 = observations["sensor_observation_BNO_055_acc"]
+        imu_gyro_3 = observations["sensor_observation_BNO_055_gyro"]
         proj_grav_3 = observations["projected_gravity_observation"]
         act_frc_obs_n = observations["actuator_force_observation"]
         base_pos_3 = observations["base_position_observation"]
