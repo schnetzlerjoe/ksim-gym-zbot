@@ -604,6 +604,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             # Standard rewards.
             ksim.StayAliveReward(scale=1.0),
             ksim.UprightReward(scale=1.0),
+            ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
             # # Avoid movement penalties.
             # ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
             # ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
