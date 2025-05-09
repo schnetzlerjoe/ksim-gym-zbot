@@ -574,7 +574,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.BaseAngularAccelerationObservation(),
             ksim.ProjectedGravityObservation.create(
                 physics_model=physics_model,
-                framequat_name="BNO_055_site_quat", # change to imu
+                framequat_name="imu_site_quat", # change to imu
                 lag_range=(0.0, 0.1),
                 noise=math.radians(1),
             ),
@@ -586,12 +586,12 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.CenterOfMassVelocityObservation(),
             ksim.SensorObservation.create(
                 physics_model=physics_model,
-                sensor_name="BNO_055_acc",
+                sensor_name="imu_acc",
                 noise=1.0,
             ),
             ksim.SensorObservation.create(
                 physics_model=physics_model,
-                sensor_name="BNO_055_gyro",
+                sensor_name="imu_gyro",
                 noise=math.radians(10),
             ),
         ]
@@ -681,8 +681,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         dh_joint_vel_j = observations["joint_velocity_observation"]
         com_inertia_n = observations["center_of_mass_inertia_observation"]
         com_vel_n = observations["center_of_mass_velocity_observation"]
-        imu_acc_3 = observations["sensor_observation_BNO_055_acc"]
-        imu_gyro_3 = observations["sensor_observation_BNO_055_gyro"]
+        imu_acc_3 = observations["sensor_observation_imu_acc"]
+        imu_gyro_3 = observations["sensor_observation_imu_gyro"]
         proj_grav_3 = observations["projected_gravity_observation"]
         act_frc_obs_n = observations["actuator_force_observation"]
         base_pos_3 = observations["base_position_observation"]
