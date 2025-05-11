@@ -1,38 +1,33 @@
 """Defines simple task for training a walking policy for the default humanoid."""
 
 import asyncio
-import json
 import logging
 import math
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, Self, Sequence, TypedDict, Union, cast
+from typing import Optional, TypedDict
 
-import attrs
 import distrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import ksim
 import mujoco
-import optax
 import mujoco_scenes
 import mujoco_scenes.mjcf
+import optax
 import xax
 from jaxtyping import Array, PRNGKeyArray
-from kscale.web.gen.api import JointMetadataOutput, ActuatorMetadataOutput, RobotURDFMetadataOutput
+from kscale.web.gen.api import JointMetadataOutput, RobotURDFMetadataOutput
 from ksim.actuators import NoiseType, StatefulActuators
 from ksim.types import PhysicsData
+from ksim.utils.mujoco import get_ctrl_data_idx_by_name
 from mujoco import mjx
-from mujoco_scenes.mjcf import load_mjmodel
-
-from ksim.utils.mujoco import get_ctrl_data_idx_by_name, log_joint_config
 
 logger = logging.getLogger(__name__)
 
 NUM_JOINTS = 20
 NUM_ACTOR_INPUTS = 43
-NUM_CRITIC_INPUTS = 444
+NUM_CRITIC_INPUTS = 476
 
 # These are in the order of the neural network outputs.
 ZEROS: list[tuple[str, float]] = [
@@ -64,7 +59,6 @@ ZEROS: list[tuple[str, float]] = [
 class PlannerState:
     position: Array
     velocity: Array
-
 
 
 class Actor(eqx.Module):
@@ -426,58 +420,70 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         )
 
         return optimizer
-    
+
     def get_mujoco_model(self) -> mujoco.MjModel:
         mjcf_path = asyncio.run(ksim.get_mujoco_model_path("zbot", name="robot"))
         return mujoco_scenes.mjcf.load_mjmodel(mjcf_path, scene="smooth")
-    
 
     def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> RobotURDFMetadataOutput:
         metadata = asyncio.run(ksim.get_mujoco_model_metadata("zbot"))
+
+        # Ensure we're returning a proper RobotURDFMetadataOutput
+        if not isinstance(metadata, RobotURDFMetadataOutput):
+            raise ValueError("Metadata is not a RobotURDFMetadataOutput")
+
+        # Already a RobotURDFMetadataOutput
         if metadata.joint_name_to_metadata is None:
             raise ValueError("Joint metadata is not available")
         if metadata.actuator_type_to_metadata is None:
             raise ValueError("Actuator metadata is not available")
         return metadata
 
-
-
-
     def get_actuators(
         self,
         physics_model: ksim.PhysicsModel,
         metadata: RobotURDFMetadataOutput | None = None,
     ) -> FeetechActuators:
-        
-        VMAX = 5.0   # rad · s⁻¹ fallback
-        AMAX = 39.0
+        vmax_default = 5.0  # rad · s⁻¹ fallback
+        amax_default = 39.0
 
         if metadata is None:
             raise ValueError("metadata must be provided")
+        if metadata.joint_name_to_metadata is None:
+            raise ValueError("Joint metadata must be provided")
+        if metadata.actuator_type_to_metadata is None:
+            raise ValueError("Actuator metadata must be provided")
 
         joint_meta = metadata.joint_name_to_metadata
         actuator_meta = metadata.actuator_type_to_metadata
 
         ctrl_indices = get_ctrl_data_idx_by_name(physics_model)  # {actuator_name: idx}
         joint_order = sorted(ctrl_indices.keys(), key=lambda x: ctrl_indices[x])
-        
+
         for actuator_name in joint_order:
             joint_name = actuator_name.split("_ctrl")[0]
             if joint_name not in joint_meta:
                 raise ValueError(f"Joint '{joint_name}' not found in metadata")
-            meta_nn_id = joint_meta[joint_name].nn_id
-            # if meta_nn_id != ctrl_indices[actuator_name]:
-            #     raise ValueError(f"Metadata nn_id for '{joint_name}' ({meta_nn_id})"
-            #                      f"!= simulator index {ctrl_indices[actuator_name]}")
+            assert joint_meta[joint_name].kp is not None
+            assert joint_meta[joint_name].kd is not None
 
         def param(joint: str, field: str, *, default: float | None = None) -> float:
-            value = getattr(actuator_meta[joint_meta[joint].actuator_type], field)
+            if joint_meta[joint].actuator_type is None:
+                raise ValueError(f"Joint '{joint}' has no actuator type specified in metadata")
+
+            actuator_type = joint_meta[joint].actuator_type
+            if actuator_type not in actuator_meta:
+                raise ValueError(f"Actuator type '{actuator_type}' for joint '{joint}' not found in metadata")
+
+            if actuator_meta[actuator_type] is None:
+                raise ValueError(f"Actuator metadata for type '{actuator_type}' is None")
+
+            value = getattr(actuator_meta[actuator_type], field)
             if value is None:
                 if default is None:
                     raise ValueError(f"Parameter '{field}' missing for joint '{joint}'")
                 return default
             return float(value)
-
 
         max_torque = []
         max_vel = []
@@ -499,11 +505,17 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             vin.append(param(name, "vin"))
             kt.append(param(name, "kt"))
             r.append(param(name, "R"))
-            vmax.append(param(name, "vmax", default=VMAX))
-            amax.append(param(name, "amax", default=AMAX))
+            vmax.append(param(name, "vmax", default=vmax_default))
+            amax.append(param(name, "amax", default=amax_default))
             err_gain.append(param(name, "error_gain"))
-            kp.append(float(joint_meta[name].kp))
-            kd.append(float(joint_meta[name].kd))
+
+            if (kp_str := joint_meta[name].kp) is None:
+                raise ValueError(f"Joint '{name}' has no kp specified in metadata")
+            kp.append(float(kp_str))
+
+            if (kd_str := joint_meta[name].kd) is None:
+                raise ValueError(f"Joint '{name}' has no kd specified in metadata")
+            kd.append(float(kd_str))
 
         # ------------------------------------------------------------------
         # 4. Instantiate controller (lists → jnp.array on‑the‑fly)
@@ -526,7 +538,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             torque_noise=0.0,
             torque_noise_type="none",
         )
-
 
     def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
         return [
@@ -556,7 +567,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
             ksim.RandomJointVelocityReset(),
             ksim.RandomHeadingReset(),
-
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
@@ -574,7 +584,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.BaseAngularAccelerationObservation(),
             ksim.ProjectedGravityObservation.create(
                 physics_model=physics_model,
-                framequat_name="imu_site_quat", # change to imu
+                framequat_name="imu_site_quat",
                 lag_range=(0.0, 0.1),
                 noise=math.radians(1),
             ),
