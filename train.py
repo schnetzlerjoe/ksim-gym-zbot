@@ -4,8 +4,9 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional, TypedDict
+from typing import Optional, Self, TypedDict
 
+import attrs
 import distrax
 import equinox as eqx
 import jax
@@ -59,6 +60,28 @@ ZEROS: list[tuple[str, float]] = [
 class PlannerState:
     position: Array
     velocity: Array
+
+
+@attrs.define(frozen=True, kw_only=True)
+class JointPositionPenalty(ksim.JointDeviationPenalty):
+    @classmethod
+    def create_from_names(
+        cls,
+        names: list[str],
+        physics_model: ksim.PhysicsModel,
+        scale: float = -1.0,
+        scale_by_curriculum: bool = False,
+    ) -> Self:
+        zeros = {k: v for k, v in ZEROS}
+        joint_targets = [zeros[name] for name in names]
+
+        return cls.create(
+            physics_model=physics_model,
+            joint_names=tuple(names),
+            joint_targets=tuple(joint_targets),
+            scale=scale,
+            scale_by_curriculum=scale_by_curriculum,
+        )
 
 
 class Actor(eqx.Module):
@@ -606,19 +629,45 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.StayAliveReward(scale=1.0),
             ksim.UprightReward(scale=1.0),
             ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
-            # # Avoid movement penalties.
-            # ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
-            # ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
-            # # Normalization penalties.
-            # ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
-            # ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            # ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
-            # ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
-            # ksim.ActionSmoothnessPenalty(scale=-0.01),
-            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
+            # Avoid movement penalties.
+            ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
+            ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
+            # Normalization penalties.
+            ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
+            ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
+            ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
+            ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
+            ksim.ActionSmoothnessPenalty(scale=-0.01),
+            ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
             # # Bespoke rewards.
             # BentArmPenalty.create_penalty(physics_model, scale=-0.1),
             # StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
+            JointPositionPenalty.create_from_names(
+                physics_model=physics_model,
+                names=[
+                    "left_shoulder_pitch",
+                    "left_shoulder_roll",
+                    "left_elbow_roll",
+                    "left_gripper_roll",
+                    "right_shoulder_pitch",
+                    "right_shoulder_roll",
+                    "right_elbow_roll",
+                    "right_gripper_roll",
+                    "left_hip_pitch",
+                    "left_hip_roll",
+                    "left_hip_yaw",
+                    "left_knee_pitch",
+                    "left_ankle_pitch",
+                    "left_ankle_roll",
+                    "right_hip_pitch",
+                    "right_hip_roll",
+                    "right_hip_yaw",
+                    "right_knee_pitch",
+                    "right_ankle_pitch",
+                    "right_ankle_roll",
+                ],
+                scale=-0.1,
+            ),
         ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
@@ -857,7 +906,7 @@ if __name__ == "__main__":
             max_action_latency=0.01,
             # Checkpointing parameters.
             save_every_n_seconds=60,
-            valid_every_n_steps=2,
+            valid_every_n_steps=20,
             valid_first_n_steps=1,
         ),
     )
