@@ -427,16 +427,9 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
     def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> RobotURDFMetadataOutput:
         metadata = asyncio.run(ksim.get_mujoco_model_metadata("zbot"))
-
         # Ensure we're returning a proper RobotURDFMetadataOutput
         if not isinstance(metadata, RobotURDFMetadataOutput):
             raise ValueError("Metadata is not a RobotURDFMetadataOutput")
-
-        # Already a RobotURDFMetadataOutput
-        if metadata.joint_name_to_metadata is None:
-            raise ValueError("Joint metadata is not available")
-        if metadata.actuator_type_to_metadata is None:
-            raise ValueError("Actuator metadata is not available")
         return metadata
 
     def get_actuators(
@@ -464,8 +457,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             joint_name = actuator_name.split("_ctrl")[0]
             if joint_name not in joint_meta:
                 raise ValueError(f"Joint '{joint_name}' not found in metadata")
-            assert joint_meta[joint_name].kp is not None
-            assert joint_meta[joint_name].kd is not None
 
         def param(joint: str, field: str, *, default: float | None = None) -> float:
             if joint_meta[joint].actuator_type is None:
