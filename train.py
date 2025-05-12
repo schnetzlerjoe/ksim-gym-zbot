@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional, Self, TypedDict
+from typing import Self, TypedDict
 
 import attrs
 import distrax
@@ -18,11 +18,10 @@ import mujoco_scenes.mjcf
 import optax
 import xax
 from jaxtyping import Array, PRNGKeyArray
-from kscale.web.gen.api import JointMetadataOutput, RobotURDFMetadataOutput
+from kscale.web.gen.api import RobotURDFMetadataOutput
 from ksim.actuators import NoiseType, StatefulActuators
 from ksim.types import PhysicsData
 from ksim.utils.mujoco import get_ctrl_data_idx_by_name
-from mujoco import mjx
 
 logger = logging.getLogger(__name__)
 
@@ -836,58 +835,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             aux_outputs=None,
         )
 
-    def create_joint_mappings(
-        self, physics_model: ksim.PhysicsModel, metadata: dict[str, JointMetadataOutput]
-    ) -> dict[str, dict]:
-        """Creates mappings between joint names, nn_ids, and actuator_ids.
-
-        Args:
-            physics_model: The MuJoCo/MJX model containing joint information
-            metadata: The joint metadata dictionary from metadata.json
-
-        Returns:
-            Dictionary mapping joint names to their nn_id and actuator_id
-        """
-        debug_lines = ["==== Joint Name to ID Mappings ===="]
-
-        # Get ordered list of joints from MuJoCo/MJX model
-        if isinstance(physics_model, mujoco.MjModel):
-            mujoco_joints = [
-                mujoco.mj_id2name(physics_model, mujoco.mjtObj.mjOBJ_JOINT, i)
-                for i in range(physics_model.njnt)
-                if mujoco.mj_id2name(physics_model, mujoco.mjtObj.mjOBJ_JOINT, i) is not None
-            ]
-        else:  # MJX model
-
-            def extract_joint_name(model: mjx.Model, idx: int) -> Optional[str]:
-                adr = model.name_jntadr[idx]
-                if adr < 0:
-                    return None
-                end = model.names.find(b"\x00", adr)
-                return model.names[adr:end].decode("utf-8")
-
-            mujoco_joints = [
-                name for i in range(physics_model.njnt) if (name := extract_joint_name(physics_model, i)) is not None
-            ]
-
-        # Create mappings using joint names as keys
-        joint_mappings = {}
-
-        # Map each joint, using MuJoCo order for nn_ids
-        for nn_id, joint_name in enumerate(mujoco_joints):
-            if joint_name in metadata:
-                actuator_id = metadata[joint_name].id
-                if actuator_id is None:
-                    logger.warning("Joint %s has no actuator id", joint_name)
-                joint_mappings[joint_name] = {"nn_id": nn_id, "actuator_id": actuator_id}
-
-                debug_lines.append("%-30s -> nn_id: %2d, actuator_id: %s" % (joint_name, nn_id, str(actuator_id)))
-            else:
-                logger.warning("Joint %s not found in metadata", joint_name)
-
-        logger.info("\n".join(debug_lines))
-        return joint_mappings
-
 
 if __name__ == "__main__":
     ZbotWalkingTask.launch(
@@ -895,7 +842,7 @@ if __name__ == "__main__":
             # Training parameters.
             num_envs=2048,
             batch_size=256,
-            num_passes=2,
+            num_passes=4,
             epochs_per_log_step=1,
             rollout_length_seconds=8.0,
             # Simulation parameters.
