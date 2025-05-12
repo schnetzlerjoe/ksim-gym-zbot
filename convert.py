@@ -11,8 +11,7 @@ from jaxtyping import Array
 from kinfer.export.jax import export_fn
 from kinfer.export.serialize import pack
 
-from train import ZbotWalkingTask, Model
-
+from train import Model, ZbotWalkingTask
 
 
 def make_export_model(model: Model) -> Callable:
@@ -96,6 +95,7 @@ def main() -> None:
     print(f"Saving model to {output_path}")
     with open(output_path, "wb") as f:
         f.write(kinfer_model)
-        
+
+
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional, Self, TypedDict
+from typing import Self, TypedDict
 
 import attrs
 import distrax
@@ -18,11 +18,10 @@ import mujoco_scenes.mjcf
 import optax
 import xax
 from jaxtyping import Array, PRNGKeyArray
-from kscale.web.gen.api import JointMetadataOutput, RobotURDFMetadataOutput
+from kscale.web.gen.api import RobotURDFMetadataOutput
 from ksim.actuators import NoiseType, StatefulActuators
 from ksim.types import PhysicsData
 from ksim.utils.mujoco import get_ctrl_data_idx_by_name
-from mujoco import mjx
 
 logger = logging.getLogger(__name__)
 
