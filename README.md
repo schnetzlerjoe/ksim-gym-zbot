@@ -69,3 +69,15 @@ To visualize running your model without using `kos-sim`, use the command:
 ```bash
 python -m train run_mode=view
 ```
+
+This repository contains a pre-trained checkpoint of a model which has been learned to be robust to pushes, which is useful for both jump-starting model training and understanding the codebase. To initialize training from this checkpoint, use the command:
+
+```bash
+python -m train load_from_ckpt_path=assets/ckpt.bin
+```
+
+You can visualize the pre-trained model by combining these two commands:
+
+```bash
+python -m train load_from_ckpt_path=assets/ckpt.bin run_mode=view
+```
