@@ -843,7 +843,7 @@ if __name__ == "__main__":
             # Training parameters.
             num_envs=2048,
             batch_size=256,
-            num_passes=2,
+            num_passes=4,
             epochs_per_log_step=1,
             rollout_length_seconds=8.0,
             # Simulation parameters.
