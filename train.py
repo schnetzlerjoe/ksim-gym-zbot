@@ -569,13 +569,13 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
         return [
             ksim.PushEvent(
-                x_force=1.5,
-                y_force=1.5,
+                x_force=1.0, # velocity in m/s
+                y_force=1.0,
                 z_force=0.1,
-                force_range=(0.1, 0.3),
-                x_angular_force=0.1,
+                force_range=(0.01, 0.5),
+                x_angular_force=0.1, # angular velocity in rad/s
                 y_angular_force=0.1,
-                z_angular_force=0.3,
+                z_angular_force=0.5,
                 interval_range=(0.5, 4.0),
             ),
         ]
