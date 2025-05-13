@@ -910,6 +910,7 @@ if __name__ == "__main__":
             # Checkpointing parameters.
             save_every_n_seconds=60,
             valid_every_n_steps=20,
+            render_full_every_n_steps=1,
             valid_first_n_steps=1,
         ),
     )
