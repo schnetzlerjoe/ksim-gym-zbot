@@ -297,6 +297,10 @@ class ZbotWalkingTaskConfig(ksim.PPOConfig):
         value=0,
         help="The body id to track with the render camera.",
     )
+    render_distance: float = xax.field(
+        value=0.8,
+        help="The distance to the render camera.",
+    )
 
 
 class FeetechParams(TypedDict):
