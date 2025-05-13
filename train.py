@@ -627,18 +627,18 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return [
             # Standard rewards.
             ksim.StayAliveReward(scale=1.0),
-            ksim.UprightReward(scale=1.0),
-            ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
+            ksim.UprightReward(scale=0.1),
+            # ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
             # Avoid movement penalties.
             ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
             ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
             # Normalization penalties.
-            ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
+            # ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
             ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
+            # ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
             ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
-            ksim.ActionSmoothnessPenalty(scale=-0.01),
-            ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
+            # ksim.ActionSmoothnessPenalty(scale=-0.01),
+            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
             # # Bespoke rewards.
             # BentArmPenalty.create_penalty(physics_model, scale=-0.1),
             # StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
@@ -903,7 +903,6 @@ if __name__ == "__main__":
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
-            max_action_latency=0.01,
             # Checkpointing parameters.
             save_every_n_seconds=60,
             valid_every_n_steps=20,
