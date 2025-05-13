@@ -461,7 +461,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         metadata: RobotURDFMetadataOutput | None = None,
     ) -> FeetechActuators:
         vmax_default = 5.0  # rad · s⁻¹ fallback
-        amax_default = 39.0
+        amax_default = 17.45
 
         if metadata is None:
             raise ValueError("metadata must be provided")
