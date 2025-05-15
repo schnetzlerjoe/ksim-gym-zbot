@@ -18,9 +18,8 @@ import mujoco_scenes.mjcf
 import optax
 import xax
 from jaxtyping import Array, PRNGKeyArray
-from kscale.web.gen.api import RobotURDFMetadataOutput
 from ksim.actuators import NoiseType, StatefulActuators
-from ksim.types import PhysicsData
+from ksim.types import Metadata, PhysicsData
 from ksim.utils.mujoco import get_ctrl_data_idx_by_name
 
 logger = logging.getLogger(__name__)
@@ -31,26 +30,26 @@ NUM_CRITIC_INPUTS = 476
 
 # These are in the order of the neural network outputs.
 ZEROS: list[tuple[str, float]] = [
-    ("left_shoulder_pitch", 0.0),
-    ("left_shoulder_roll", 0.0),
-    ("left_elbow_roll", 0.0),
-    ("left_gripper_roll", 0.0),
-    ("right_shoulder_pitch", 0.0),
-    ("right_shoulder_roll", 0.0),
-    ("right_elbow_roll", 0.0),
-    ("right_gripper_roll", 0.0),
-    ("left_hip_pitch", 0.0),
-    ("left_hip_roll", 0.0),
-    ("left_hip_yaw", 0.0),
-    ("left_knee_pitch", 0.0),
-    ("left_ankle_pitch", 0.0),
-    ("left_ankle_roll", 0.0),
-    ("right_hip_pitch", 0.0),
-    ("right_hip_roll", 0.0),
     ("right_hip_yaw", 0.0),
+    ("right_hip_roll", 0.0),
+    ("right_hip_pitch", 0.0),
     ("right_knee_pitch", 0.0),
     ("right_ankle_pitch", 0.0),
     ("right_ankle_roll", 0.0),
+    ("left_hip_yaw", 0.0),
+    ("left_hip_roll", 0.0),
+    ("left_hip_pitch", 0.0),
+    ("left_knee_pitch", 0.0),
+    ("left_ankle_pitch", 0.0),
+    ("left_ankle_roll", 0.0),
+    ("left_shoulder_pitch", 0.0),
+    ("left_shoulder_roll", 0.5),
+    ("left_elbow_roll", 0.0),
+    ("left_gripper_roll", 0.0),
+    ("right_shoulder_pitch", 0.0),
+    ("right_shoulder_roll", -0.5),
+    ("right_elbow_roll", 0.0),
+    ("right_gripper_roll", 0.0),
 ]
 
 
@@ -296,6 +295,10 @@ class ZbotWalkingTaskConfig(ksim.PPOConfig):
         value=0,
         help="The body id to track with the render camera.",
     )
+    render_distance: float = xax.field(
+        value=0.8,
+        help="The distance to the render camera.",
+    )
 
 
 class FeetechParams(TypedDict):
@@ -447,20 +450,20 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         mjcf_path = asyncio.run(ksim.get_mujoco_model_path("zbot", name="robot"))
         return mujoco_scenes.mjcf.load_mjmodel(mjcf_path, scene="smooth")
 
-    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> RobotURDFMetadataOutput:
+    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> Metadata:
         metadata = asyncio.run(ksim.get_mujoco_model_metadata("zbot"))
         # Ensure we're returning a proper RobotURDFMetadataOutput
-        if not isinstance(metadata, RobotURDFMetadataOutput):
-            raise ValueError("Metadata is not a RobotURDFMetadataOutput")
+        if not isinstance(metadata, Metadata):
+            raise ValueError("Metadata is not a Metadata")
         return metadata
 
     def get_actuators(
         self,
         physics_model: ksim.PhysicsModel,
-        metadata: RobotURDFMetadataOutput | None = None,
+        metadata: Metadata | None = None,
     ) -> FeetechActuators:
         vmax_default = 5.0  # rad · s⁻¹ fallback
-        amax_default = 39.0
+        amax_default = 17.45
 
         if metadata is None:
             raise ValueError("metadata must be provided")
@@ -564,13 +567,13 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
         return [
             ksim.PushEvent(
-                x_force=1.5,
-                y_force=1.5,
+                x_force=1.0,  # velocity in m/s
+                y_force=1.0,
                 z_force=0.1,
-                force_range=(0.1, 0.3),
-                x_angular_force=0.1,
+                force_range=(0.01, 0.5),
+                x_angular_force=0.1,  # angular velocity in rad/s
                 y_angular_force=0.1,
-                z_angular_force=0.3,
+                z_angular_force=0.5,
                 interval_range=(0.5, 4.0),
             ),
         ]
@@ -626,45 +629,24 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return [
             # Standard rewards.
             ksim.StayAliveReward(scale=1.0),
-            ksim.UprightReward(scale=1.0),
-            ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
+            ksim.UprightReward(scale=0.1),
+            # ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
             # Avoid movement penalties.
             ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
             ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
             # Normalization penalties.
-            ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
+            # ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
             ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
+            # ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
             ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
-            ksim.ActionSmoothnessPenalty(scale=-0.01),
-            ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
+            # ksim.ActionSmoothnessPenalty(scale=-0.01),
+            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
             # # Bespoke rewards.
             # BentArmPenalty.create_penalty(physics_model, scale=-0.1),
             # StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
             JointPositionPenalty.create_from_names(
                 physics_model=physics_model,
-                names=[
-                    "left_shoulder_pitch",
-                    "left_shoulder_roll",
-                    "left_elbow_roll",
-                    "left_gripper_roll",
-                    "right_shoulder_pitch",
-                    "right_shoulder_roll",
-                    "right_elbow_roll",
-                    "right_gripper_roll",
-                    "left_hip_pitch",
-                    "left_hip_roll",
-                    "left_hip_yaw",
-                    "left_knee_pitch",
-                    "left_ankle_pitch",
-                    "left_ankle_roll",
-                    "right_hip_pitch",
-                    "right_hip_roll",
-                    "right_hip_yaw",
-                    "right_knee_pitch",
-                    "right_ankle_pitch",
-                    "right_ankle_roll",
-                ],
+                names=[name for name, _ in ZEROS],
                 scale=-0.1,
             ),
         ]
@@ -832,7 +814,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return ksim.Action(
             action=action_j,
             carry=(actor_carry, critic_carry_in),
-            aux_outputs=None,
         )
 
 
@@ -850,10 +831,10 @@ if __name__ == "__main__":
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
-            max_action_latency=0.01,
             # Checkpointing parameters.
             save_every_n_seconds=60,
             valid_every_n_steps=20,
+            render_full_every_n_steps=1,
             valid_first_n_steps=1,
         ),
     )
