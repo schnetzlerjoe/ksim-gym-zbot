@@ -18,9 +18,8 @@ import mujoco_scenes.mjcf
 import optax
 import xax
 from jaxtyping import Array, PRNGKeyArray
-from kscale.web.gen.api import RobotURDFMetadataOutput
 from ksim.actuators import NoiseType, StatefulActuators
-from ksim.types import PhysicsData
+from ksim.types import Metadata, PhysicsData
 from ksim.utils.mujoco import get_ctrl_data_idx_by_name
 
 logger = logging.getLogger(__name__)
@@ -451,17 +450,17 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         mjcf_path = asyncio.run(ksim.get_mujoco_model_path("zbot", name="robot"))
         return mujoco_scenes.mjcf.load_mjmodel(mjcf_path, scene="smooth")
 
-    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> RobotURDFMetadataOutput:
+    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> Metadata:
         metadata = asyncio.run(ksim.get_mujoco_model_metadata("zbot"))
         # Ensure we're returning a proper RobotURDFMetadataOutput
-        if not isinstance(metadata, RobotURDFMetadataOutput):
-            raise ValueError("Metadata is not a RobotURDFMetadataOutput")
+        if not isinstance(metadata, Metadata):
+            raise ValueError("Metadata is not a Metadata")
         return metadata
 
     def get_actuators(
         self,
         physics_model: ksim.PhysicsModel,
-        metadata: RobotURDFMetadataOutput | None = None,
+        metadata: Metadata | None = None,
     ) -> FeetechActuators:
         vmax_default = 5.0  # rad · s⁻¹ fallback
         amax_default = 17.45
@@ -568,11 +567,11 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
         return [
             ksim.PushEvent(
-                x_force=1.0, # velocity in m/s
+                x_force=1.0,  # velocity in m/s
                 y_force=1.0,
                 z_force=0.1,
                 force_range=(0.01, 0.5),
-                x_angular_force=0.1, # angular velocity in rad/s
+                x_angular_force=0.1,  # angular velocity in rad/s
                 y_angular_force=0.1,
                 z_angular_force=0.5,
                 interval_range=(0.5, 4.0),
