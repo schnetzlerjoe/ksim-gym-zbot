@@ -814,7 +814,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return ksim.Action(
             action=action_j,
             carry=(actor_carry, critic_carry_in),
-            aux_outputs=None,
         )
 
 
