@@ -827,14 +827,14 @@ if __name__ == "__main__":
             epochs_per_log_step=1,
             rollout_length_seconds=8.0,
             # Simulation parameters.
-            dt=0.002,
+            dt=0.001,
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
             # Checkpointing parameters.
             save_every_n_seconds=60,
             valid_every_n_steps=20,
-            render_full_every_n_steps=1,
+            render_full_every_n_seconds=60,
             valid_first_n_steps=1,
         ),
     )
