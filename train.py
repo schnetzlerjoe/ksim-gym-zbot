@@ -1,5 +1,6 @@
 """Defines simple task for training a walking policy for the default humanoid."""
 
+
 import asyncio
 import logging
 import math
@@ -31,13 +32,13 @@ NUM_CRITIC_INPUTS = 476
 # These are in the order of the neural network outputs.
 ZEROS: list[tuple[str, float]] = [
     ("right_hip_yaw", 0.0),
-    ("right_hip_roll", 0.0),
+    ("right_hip_roll", -0.1),
     ("right_hip_pitch", 0.0),
     ("right_knee_pitch", 0.0),
     ("right_ankle_pitch", 0.0),
     ("right_ankle_roll", 0.0),
     ("left_hip_yaw", 0.0),
-    ("left_hip_roll", 0.0),
+    ("left_hip_roll", 0.1),
     ("left_hip_pitch", 0.0),
     ("left_knee_pitch", 0.0),
     ("left_ankle_pitch", 0.0),
@@ -160,8 +161,8 @@ class Actor(eqx.Module):
         # Softplus and clip to ensure positive standard deviations.
         std_nm = jnp.clip((jax.nn.softplus(std_nm) + self.min_std) * self.var_scale, max=self.max_std)
 
-        # Apply bias to the means.
-        mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
+        # Comment out because we now sample deltas not absolute positions
+        #mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
 
         dist_n = ksim.MixtureOfGaussians(means_nm=mean_nm, stds_nm=std_nm, logits_nm=logits_nm)
 
@@ -321,7 +322,7 @@ def trapezoidal_step(
     state: PlannerState, target_position: Array, dt: float
 ) -> tuple[PlannerState, tuple[Array, Array]]:
     v_max = 5.0
-    a_max = 39.0
+    a_max = 39
 
     position_error = target_position - state.position
     direction = jnp.sign(position_error)
@@ -387,6 +388,7 @@ class FeetechActuators(StatefulActuators):
         self.torque_noise = torque_noise
         self.torque_noise_type = torque_noise_type
 
+
     def get_stateful_ctrl(
         self,
         action: Array,
@@ -434,6 +436,8 @@ class FeetechActuators(StatefulActuators):
 
 
 class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
+    delta_max_j: jnp.ndarray | None = None   # set later in get_actuators
+
     def get_optimizer(self) -> optax.GradientTransformation:
         optimizer = optax.chain(
             optax.clip_by_global_norm(self.config.max_grad_norm),
@@ -533,6 +537,14 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 raise ValueError(f"Joint '{name}' has no kd specified in metadata")
             kd.append(float(kd_str))
 
+
+        #Reachability vector -- Δmax = v max · Δt  +  ½ a max · Δt²
+        delta_max = (
+            jnp.array(vmax) * self.config.ctrl_dt               #  v·Δt term
+            + 0.5 * jnp.array(amax) * self.config.ctrl_dt ** 2  #  ½·a·Δt² term
+        )
+        self.delta_max_j = delta_max
+
         # ------------------------------------------------------------------
         # 4. Instantiate controller (lists → jnp.array on‑the‑fly)
         # ------------------------------------------------------------------
@@ -549,9 +561,9 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             amax_j=jnp.array(amax),
             error_gain_j=jnp.array(err_gain),
             dt=self.config.dt,
-            action_noise=0.0,
+            action_noise=0.1,
             action_noise_type="none",
-            torque_noise=0.0,
+            torque_noise=0.1,
             torque_noise_type="none",
         )
 
@@ -565,16 +577,17 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
+        #return [] #disable push events
         return [
             ksim.PushEvent(
-                x_force=1.0,  # velocity in m/s
-                y_force=1.0,
-                z_force=0.1,
-                force_range=(0.01, 0.5),
+                x_force=0.2,
+                y_force=0.5,
+                z_force=0.0,
+                force_range=(0.05, 2),
                 x_angular_force=0.1,  # angular velocity in rad/s
                 y_angular_force=0.1,
                 z_angular_force=0.5,
-                interval_range=(0.5, 4.0),
+                interval_range=(2.0, 4.0)
             ),
         ]
 
@@ -586,7 +599,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
-        return [
+        obs_list = [
             ksim.JointPositionObservation(noise=math.radians(2)),
             ksim.JointVelocityObservation(noise=math.radians(10)),
             ksim.ActuatorForceObservation(),
@@ -621,35 +634,35 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 noise=math.radians(10),
             ),
         ]
+        
+        # Add action-position observation for each joint
+        obs_list.extend([
+            ksim.ActPosObservation.create(
+                physics_model=physics_model,
+                joint_name=joint_name,
+            ) for joint_name, _ in ZEROS
+        ])
+
+        return obs_list
 
     def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
         return []
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
-            # Standard rewards.
             ksim.StayAliveReward(scale=1.0),
-            ksim.UprightReward(scale=0.1),
-            # ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
-            # Avoid movement penalties.
-            ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
-            ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
-            # Normalization penalties.
-            # ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
+            ksim.UprightReward(scale=1.0),
+            ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+
             ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            # ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
-            ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
-            # ksim.ActionSmoothnessPenalty(scale=-0.01),
-            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
-            # # Bespoke rewards.
-            # BentArmPenalty.create_penalty(physics_model, scale=-0.1),
-            # StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
-            JointPositionPenalty.create_from_names(
-                physics_model=physics_model,
-                names=[name for name, _ in ZEROS],
-                scale=-0.1,
-            ),
-        ]
+
+            # JointPositionPenalty.create_from_names(
+            #     physics_model=physics_model,
+            #     names=[name for name, _ in ZEROS],
+            #     scale=-0.1,
+            # ),
+            ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
@@ -671,7 +684,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             key,
             num_inputs=NUM_ACTOR_INPUTS,
             num_outputs=NUM_JOINTS,
-            min_std=0.01,
+            min_std=0.001,
             max_std=1.0,
             hidden_size=self.config.hidden_size,
             num_mixtures=self.config.num_mixtures,
@@ -811,8 +824,16 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
         action_j = action_dist_j.mode() if argmax else action_dist_j.sample(seed=rng)
 
+        # --- planner envelope‑aware mapping ----------
+        # 1. Convert unbounded raw actions to [-1, 1] with tanh
+        delta_norm_j = jnp.tanh(action_j)
+        # 2. Scale by per‑joint reachability and add to current position
+        qpos_j = physics_state.data.qpos[7:]           # current joint angles
+        target_j = qpos_j + delta_norm_j * self.delta_max_j
+        # -------------------------------------------------
+
         return ksim.Action(
-            action=action_j,
+            action=target_j,
             carry=(actor_carry, critic_carry_in),
         )
 
@@ -827,14 +848,18 @@ if __name__ == "__main__":
             epochs_per_log_step=1,
             rollout_length_seconds=8.0,
             # Simulation parameters.
-            dt=0.002,
+            dt=0.001,
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
             # Checkpointing parameters.
             save_every_n_seconds=60,
             valid_every_n_steps=20,
-            render_full_every_n_steps=1,
-            valid_first_n_steps=1,
+            render_full_every_n_seconds=60,
+            valid_first_n_steps=0,
+            only_save_most_recent=False,
+            save_every_n_steps=50,
+            action_latency_range=(0.005, 0.01),
+
         ),
     )
