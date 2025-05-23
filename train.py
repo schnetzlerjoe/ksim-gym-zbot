@@ -32,13 +32,13 @@ NUM_CRITIC_INPUTS = 476
 # These are in the order of the neural network outputs.
 ZEROS: list[tuple[str, float]] = [
     ("right_hip_yaw", 0.0),
-    ("right_hip_roll", -0.1),
+    ("right_hip_roll", 0.0),
     ("right_hip_pitch", 0.0),
     ("right_knee_pitch", 0.0),
     ("right_ankle_pitch", 0.0),
     ("right_ankle_roll", 0.0),
     ("left_hip_yaw", 0.0),
-    ("left_hip_roll", 0.1),
+    ("left_hip_roll", 0.0),
     ("left_hip_pitch", 0.0),
     ("left_knee_pitch", 0.0),
     ("left_ankle_pitch", 0.0),
