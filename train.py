@@ -467,7 +467,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         metadata: Metadata | None = None,
     ) -> FeetechActuators:
         vmax_default = 5.0  # rad · s⁻¹ fallback
-        amax_default = 17.45
+        amax_default = 39.0 # 17.45
 
         if metadata is None:
             raise ValueError("metadata must be provided")
@@ -577,19 +577,19 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
-        #return [] #disable push events
-        return [
-            ksim.PushEvent(
-                x_force=0.2,
-                y_force=0.5,
-                z_force=0.0,
-                force_range=(0.05, 2),
-                x_angular_force=0.1,  # angular velocity in rad/s
-                y_angular_force=0.1,
-                z_angular_force=0.5,
-                interval_range=(2.0, 4.0)
-            ),
-        ]
+        return [] #disable push events
+        #return [
+        #    ksim.PushEvent(
+        #          x_force=0.2,
+        #        y_force=0.5,
+        #        z_force=0.0,
+        #        force_range=(0.05, 2),
+        #        x_angular_force=0.1,  # angular velocity in rad/s
+        #        y_angular_force=0.1,
+        #        z_angular_force=0.5,
+        #        interval_range=(2.0, 4.0)
+        #    ),
+        #]
 
     def get_resets(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reset]:
         return [
@@ -684,7 +684,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             key,
             num_inputs=NUM_ACTOR_INPUTS,
             num_outputs=NUM_JOINTS,
-            min_std=0.001,
+            min_std=0.01,
             max_std=1.0,
             hidden_size=self.config.hidden_size,
             num_mixtures=self.config.num_mixtures,
