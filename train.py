@@ -44,11 +44,11 @@ ZEROS: list[tuple[str, float]] = [
     ("left_knee_pitch", -0.279253),
     ("left_ankle_pitch", -0.191986),
     ("left_ankle_roll", 0.0959931),
-    ("left_shoulder_pitch", 0.45256388),
+    ("left_shoulder_pitch", 0.2),
     ("left_shoulder_roll", 0.174533),
     ("left_elbow_roll", 0.0),
     ("left_gripper_roll", 0.0),
-    ("right_shoulder_pitch", -0.45256388),
+    ("right_shoulder_pitch", -0.2),
     ("right_shoulder_roll", -0.174533),
     ("right_elbow_roll", 0.0),
     ("right_gripper_roll", 0.0),
@@ -322,33 +322,80 @@ class FeetechParams(TypedDict):
 
 
 def trapezoidal_step(
-    state: PlannerState, target_position: Array, dt: float
+    state: PlannerState, target_position: Array, dt: float, v_max: float, a_max: float
 ) -> tuple[PlannerState, tuple[Array, Array]]:
-    v_max = 5.0
-    a_max = 17.45
+
 
     position_error = target_position - state.position
-    direction = jnp.sign(position_error)
+    target_direction = jnp.sign(position_error)
+    
+    # Calculate stopping distance for current velocity
+    stopping_distance = jnp.abs(state.velocity**2) / (2 * a_max)
+    
+    # Check if velocity is aligned with target direction
+    velocity_direction = jnp.sign(state.velocity)
+    moving_towards_target = velocity_direction * target_direction >= 0
+    
+    # Decision logic:
+    # 1. If moving away from target → always decelerate
+    # 2. If moving towards target but too close → decelerate  
+    # 3. If moving towards target and far enough → accelerate
+    # 4. If stopped → accelerate towards target
+    
 
-    stopping_distance = (state.velocity**2) / (2 * a_max)
+    # Add some hysteresis to prevent oscillation
+    position_threshold = 0.005  # Small deadband
+    should_accelerate = jnp.logical_and(
+        moving_towards_target,  
+        jnp.abs(position_error) > (stopping_distance + position_threshold)  # Add deadband
+    )
+    #should_accelerate = jnp.logical_and(
+    #    moving_towards_target,  # Moving in right direction
+    #    jnp.abs(position_error) > stopping_distance  # Far enough to accelerate
+    #)
+    
+    # Choose acceleration
+    acceleration = jnp.where(
+        should_accelerate,
+        target_direction * a_max,  # Accelerate towards target
+        -velocity_direction * a_max  # Decelerate (oppose current velocity)
+    )
+    
+    # Handle zero velocity case
+    acceleration = jnp.where(
+        jnp.abs(state.velocity) < 1e-6,
+        target_direction * a_max,  # If stopped, accelerate towards target
+        acceleration
+    )
 
-    # Decide accelerate or decelerate
-    should_accelerate = jnp.abs(position_error) > stopping_distance
-
-    acceleration = jnp.where(should_accelerate, direction * a_max, -direction * a_max)
+    #jax.debug.print("Accel debug: should_accel:{should_accel} accel:{accel} old_vel:{old_vel} new_vel_before_clip:{new_vel_before_clip}", 
+    #                should_accel=should_accelerate[0], 
+    #                accel=acceleration[0], 
+    #                old_vel=state.velocity[0],
+    #                new_vel_before_clip=(state.velocity + acceleration * dt)[0])
+    
     new_velocity = state.velocity + acceleration * dt
-
-    # Clamp velocity
     new_velocity = jnp.clip(new_velocity, -v_max, v_max)
-
-    # Prevent overshoot when decelerating
-    new_velocity = jnp.where(direction * new_velocity < 0, 0.0, new_velocity)
-
+    
+    # Prevent overshoot when close to target
+    #would_overshoot = jnp.logical_and(
+    #    jnp.abs(position_error) < jnp.abs(new_velocity) * dt,
+    #    target_direction * new_velocity > 0
+    #)
+    #new_velocity = jnp.where(would_overshoot, 0.0, new_velocity)
+    
     new_position = state.position + new_velocity * dt
+    
+    new_state = PlannerState(
+        position=new_position, 
+        velocity=new_velocity, 
+        last_computed_torque=state.last_computed_torque
+    )
 
-    new_state = PlannerState(position=new_position, velocity=new_velocity, last_computed_torque=state.last_computed_torque)
-
+    
+    
     return new_state, (new_position, new_velocity)
+
 
 
 class FeetechActuators(StatefulActuators):
@@ -390,8 +437,8 @@ class FeetechActuators(StatefulActuators):
         self.action_noise_type = action_noise_type
         self.torque_noise = torque_noise
         self.torque_noise_type = torque_noise_type
-
-
+        self.debug_counter = 0
+    
     def get_stateful_ctrl(
         self,
         action: Array,
@@ -406,7 +453,7 @@ class FeetechActuators(StatefulActuators):
         current_vel_j = physics_data.qvel[6:]
 
         planner_state = actuator_state
-        planner_state, (desired_position, desired_velocity) = trapezoidal_step(planner_state, action, self.dt)
+        planner_state, (desired_position, desired_velocity) = trapezoidal_step(planner_state, action, self.dt, self.vmax_j, self.amax_j)
 
         pos_error_j = desired_position - current_pos_j
         vel_error_j = desired_velocity - current_vel_j
@@ -424,9 +471,50 @@ class FeetechActuators(StatefulActuators):
             velocity=planner_state.velocity,      # Updated by trapezoidal_step  
             last_computed_torque=torque_j         # New computed torque
         )
+
+        #jax.debug.print("State carry: input_vel:{input_vel} output_vel:{output_vel}", 
+        #        input_vel=actuator_state.velocity[0],
+        #        output_vel=new_planner_state.velocity[0])
         # Add noise to torque
         torque_j_noisy = self.add_noise(self.torque_noise, self.torque_noise_type, torque_j, tor_rng)
 
+        def debug_print():
+            jax.debug.print(
+                "=== Joint 0 Debug (step {step}) ===\n"
+                "Positions: current:{current_pos:.6f} desired:{desired_pos:.6f} target:{target:.6f}\n"
+                "Velocities: current:{current_vel:.6f} desired:{desired_vel:.6f}\n"
+                "Errors: pos_err:{pos_error:.6f} vel_err:{vel_error:.6f}\n"
+                "Control: kp:{kp:.1f} kd:{kd:.3f} err_gain:{error_gain:.3f}\n"
+                "PWM: raw_duty:{raw_duty:.6f} clipped_duty:{duty:.6f}\n"
+                "Output: volts:{volts:.3f} torque:{torque:.3f}\n"
+                "Dt: {dt:.6f}\n"
+                "Planner state: pos:{planner_pos:.6f} vel:{planner_vel:.6f}",
+                step=self.debug_counter,
+                current_pos=current_pos_j[0],
+                desired_pos=desired_position[0],
+                target=action[0],
+                current_vel=current_vel_j[0],
+                desired_vel=desired_velocity[0],
+                pos_error=pos_error_j[0],
+                vel_error=vel_error_j[0],
+                kp=self.kp_j[0],
+                kd=self.kd_j[0],
+                error_gain=self.error_gain_j[0],
+                raw_duty=raw_duty_j[0],
+                duty=duty_j[0],
+                volts=volts_j[0],
+                torque=torque_j[0],
+                dt=self.dt,
+                planner_pos=planner_state.position[0],
+                planner_vel=planner_state.velocity[0],
+            )
+
+        #self.debug_counter += 1
+        #jax.lax.cond(
+        #    (self.debug_counter % 100 == 0) & (jnp.abs(pos_error_j[0]) > 0.001),
+        #    debug_print,
+        #    lambda: None
+        #)
         return torque_j_noisy, new_planner_state
 
     def get_default_action(self, physics_data: PhysicsData) -> Array:
@@ -484,7 +572,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         metadata: Metadata | None = None,
     ) -> FeetechActuators:
         vmax_default = 5.0  # rad · s⁻¹ fallback
-        amax_default = 39.0 # 17.45
+        amax_default = 17.45
 
         if metadata is None:
             raise ValueError("metadata must be provided")
@@ -680,14 +768,14 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         return [
             ksim.StayAliveReward(scale=1.0),
             ksim.UprightReward(scale=0.5),
-            ksim.NaiveForwardReward(clip_max=1.25, in_robot_frame=False, scale=1.0, scale_by_curriculum=True),
+            #ksim.NaiveForwardReward(clip_max=1.25, in_robot_frame=False, scale=1.0, scale_by_curriculum=True),
             #ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
             #ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
 
             ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
             ksim.ReachabilityPenalty(
                 delta_max_j=tuple(float(x) for x in self.delta_max_j),
-                scale=-0.4,
+                scale=-0.5,
                 squared=True,
                 scale_by_curriculum=True,
             ),
@@ -695,7 +783,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             JointPositionPenalty.create_from_names(
                 physics_model=physics_model,
                 names=[name for name, _ in ZEROS],
-                scale=-0.1,
+                scale=-0.2,
             ),
             ]
 
@@ -877,6 +965,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
         action_j = action_dist_j.mode() if argmax else action_dist_j.sample(seed=rng)
 
+
+        # We are not using the planner envelope‑aware mapping
         # --- planner envelope‑aware mapping ----------
         # 1. Convert unbounded raw actions to [-1, 1] with tanh
         #delta_norm_j = jnp.tanh(action_j)
