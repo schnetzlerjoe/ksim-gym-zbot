@@ -785,6 +785,13 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 names=[name for name, _ in ZEROS],
                 scale=-0.2,
             ),
+            ksim.ActionJerkDeltaMaxPenalty(
+                dt=self.config.ctrl_dt,
+                delta_max_j=tuple(float(x) for x in self.delta_max_j),
+                scale=-0.005,
+                norm="l2",
+                scale_by_curriculum=True,
+            ),
             ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
