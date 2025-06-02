@@ -1,5 +1,121 @@
-"""Defines simple task for training a wealking policy for the zbot"""
+"""
+================================================================================
+ZBOT WALKING TASK - CURRENT CONFIGURATION SUMMARY
+================================================================================
 
+TRAINING HYPERPARAMETERS:
+- Environments: 2048
+- Batch Size: 256  
+- PPO Passes: 4
+- Rollout Length: 8.0 seconds
+- Learning Rate: 3e-4
+- Max Grad Norm: 2.0
+- Adam Weight Decay: 1e-5
+
+SIMULATION PARAMETERS:
+- Physics dt: 0.001s (1000 Hz)
+- Control dt: 0.02s (50 Hz) 
+- Solver Iterations: 8
+- Line Search Iterations: 8
+
+NEURAL NETWORK ARCHITECTURE:
+- Actor Inputs: 43 (joint_pos[20] + joint_vel[20] + proj_gravity[3])
+- Critic Inputs: 476 (comprehensive state information)
+- Hidden Size: 128
+- RNN Depth: 5 layers (GRU cells)
+- Output Mixtures: 5 (Mixture of Gaussians)
+- Action Std: min=0.001, max=0.1, var_scale=1.0
+
+ACTUATOR CONFIGURATION (Feetech):
+- Action Noise: 0.01 (disabled - "none")
+- Torque Noise: 0.01 (disabled - "none") 
+- Uses trapezoidal velocity profile planning
+- Per-joint reachability constraints via delta_max
+
+ACTIVE REWARDS & SCALING:
+✓ StayAliveReward                    : +1.0
+✓ UprightReward                      : +0.5
+✓ AngularVelocityPenalty (x,y,z)     : -0.005  [curriculum scaled]
+✓ LinearVelocityPenalty (x,y,z)      : -0.005  [curriculum scaled]
+✓ AvoidLimitsPenalty                 : -0.01
+✓ ReachabilityPenalty                : -1.0    [squared, curriculum scaled]
+✓ JointPositionPenalty (to ZEROS)    : -0.25
+✓ ActionJerkDeltaMaxPenalty          : -0.003  [L2 norm, curriculum scaled]
+✓ JointVelocityPenalty               : -5.0    [curriculum scaled]
+
+DISABLED REWARDS:
+✗ NaiveForwardReward                 : commented out
+✗ ActionAccelerationPenalty          : commented out  
+✗ MinActionStepPenalty               : commented out
+✗ ActionDeltaHingePenalty            : commented out
+
+ACTIVE TERMINATIONS:
+✓ BadZTermination                    : z ∈ [0.05, 0.5] meters
+
+DISABLED TERMINATIONS:
+✗ PitchTooGreatTermination           : commented out (was ±30°)
+✗ RollTooGreatTermination            : commented out (was ±30°)
+✗ HighVelocityTermination            : commented out
+✗ FarFromOriginTermination           : commented out (was 10m)
+
+ACTIVE PHYSICS RANDOMIZERS:
+✓ StaticFrictionRandomizer           : default scaling
+✓ ArmatureRandomizer                 : default scaling  
+✓ AllBodiesMassMultiplicationRandomizer : scale ∈ [0.95, 1.15]
+✓ JointDampingRandomizer             : default scaling
+✓ JointZeroPositionRandomizer        : ±4° (±0.0698 rad)
+✓ FloorFrictionRandomizer            : scale ∈ [0.3, 1.5]
+✓ IMUAlignmentRandomizer             : tilt_std=5°, yaw_std=1°, translate_std=5mm
+
+ACTIVE RESETS:
+✓ RandomJointPositionReset           : ZEROS positions ± 10% scale
+✓ RandomJointVelocityReset           : default scaling
+✓ RandomHeadingReset                 : default scaling
+
+DISABLED EVENTS:
+✗ PushEvent                          : commented out (was x/y=0.1, z=0.05 linvel)
+
+CURRICULUM:
+✓ LinearCurriculum                   : step_size=0.1, every 10 epochs
+
+OBSERVATION NOISE LEVELS:
+- JointPositionObservation           : ±0.05 rad (±2.9°)
+- JointVelocityObservation           : ±0.1 rad/s (±5.7°/s)
+- ProjectedGravityObservation        : 0.2 + 10% dropout + 0.5x scaling
+- IMU Accelerometer                  : 0.5 noise
+- IMU Gyroscope                      : ±10° (±0.175 rad) noise
+- ProjectedGravity lag               : 0-20ms range
+
+TARGET JOINT POSITIONS (ZEROS):
+- Hip Yaw (L/R)         : 0.0 rad
+- Hip Roll (R/L)        : ∓0.122 rad (∓7°)  
+- Hip Pitch (L/R)       : -0.140 rad (-8°)
+- Knee Pitch (L/R)      : -0.279 rad (-16°)
+- Ankle Pitch (L/R)     : -0.192 rad (-11°)
+- Ankle Roll (R/L)      : ∓0.096 rad (∓5.5°)
+- Shoulder Pitch (L/R)  : ±0.2 rad (±11.5°)
+- Shoulder Roll (L/R)   : ±0.175 rad (±10°)
+- Elbow/Gripper Roll    : 0.0 rad
+
+ACTOR OBSERVATION PREPROCESSING:
+- Joint positions: raw
+- Joint velocities: raw  
+- Projected gravity: 0.5x scale + 10% random dropout
+
+CRITIC OBSERVATION PREPROCESSING:
+- Joint velocities: /10.0 scaling
+- Actuator forces: /100.0 scaling
+- All other observations: raw
+
+CHECKPOINTING & LOGGING:
+- Save every: 60 seconds OR 50 steps
+- Validation every: 20 steps  
+- Render full every: 60 seconds
+- Only save most recent: True
+- Log every: 1 epoch
+
+================================================================================
+"""
 
 import asyncio
 import logging
@@ -325,7 +441,6 @@ def trapezoidal_step(
     state: PlannerState, target_position: Array, dt: float, v_max: float, a_max: float
 ) -> tuple[PlannerState, tuple[Array, Array]]:
 
-
     position_error = target_position - state.position
     target_direction = jnp.sign(position_error)
     
@@ -342,18 +457,12 @@ def trapezoidal_step(
     # 3. If moving towards target and far enough → accelerate
     # 4. If stopped → accelerate towards target
     
-
     # Add some hysteresis to prevent oscillation
-    position_threshold = 0.005  # Small deadband
+    position_threshold = 0.02  # Small deadband
     should_accelerate = jnp.logical_and(
         moving_towards_target,  
         jnp.abs(position_error) > (stopping_distance + position_threshold)  # Add deadband
     )
-    #should_accelerate = jnp.logical_and(
-    #    moving_towards_target,  # Moving in right direction
-    #    jnp.abs(position_error) > stopping_distance  # Far enough to accelerate
-    #)
-    
     # Choose acceleration
     acceleration = jnp.where(
         should_accelerate,
@@ -367,13 +476,6 @@ def trapezoidal_step(
         target_direction * a_max,  # If stopped, accelerate towards target
         acceleration
     )
-
-    #jax.debug.print("Accel debug: should_accel:{should_accel} accel:{accel} old_vel:{old_vel} new_vel_before_clip:{new_vel_before_clip}", 
-    #                should_accel=should_accelerate[0], 
-    #                accel=acceleration[0], 
-    #                old_vel=state.velocity[0],
-    #                new_vel_before_clip=(state.velocity + acceleration * dt)[0])
-    
     new_velocity = state.velocity + acceleration * dt
     new_velocity = jnp.clip(new_velocity, -v_max, v_max)
     
@@ -391,9 +493,6 @@ def trapezoidal_step(
         velocity=new_velocity, 
         last_computed_torque=state.last_computed_torque
     )
-
-    
-    
     return new_state, (new_position, new_velocity)
 
 
@@ -666,9 +765,9 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             amax_j=jnp.array(amax),
             error_gain_j=jnp.array(err_gain),
             dt=self.config.dt,
-            action_noise=0.1,
+            action_noise=0.01,
             action_noise_type="none",
-            torque_noise=0.1,
+            torque_noise=0.01,
             torque_noise_type="none",
         )
 
@@ -691,7 +790,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
-        #return [] #disable push events
+        return [] #disable push events
         return [
             ksim.PushEvent(
                 x_linvel=0.1,
@@ -714,8 +813,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
         obs_list = [
-            ksim.JointPositionObservation(noise=math.radians(2)),
-            ksim.JointVelocityObservation(noise=math.radians(10)),
+            ksim.JointPositionObservation(noise=math.radians(0.05)),
+            ksim.JointVelocityObservation(noise=math.radians(0.1)),
             ksim.ActuatorForceObservation(),
             FeetechTorqueObservation(),
             ksim.CenterOfMassInertiaObservation(),
@@ -769,13 +868,13 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.StayAliveReward(scale=1.0),
             ksim.UprightReward(scale=0.5),
             #ksim.NaiveForwardReward(clip_max=1.25, in_robot_frame=False, scale=1.0, scale_by_curriculum=True),
-            #ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
-            #ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
 
             ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
             ksim.ReachabilityPenalty(
                 delta_max_j=tuple(float(x) for x in self.delta_max_j),
-                scale=-0.5,
+                scale=-1.0,
                 squared=True,
                 scale_by_curriculum=True,
             ),
@@ -783,15 +882,35 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             JointPositionPenalty.create_from_names(
                 physics_model=physics_model,
                 names=[name for name, _ in ZEROS],
-                scale=-0.2,
+                scale=-0.25,
             ),
             ksim.ActionJerkDeltaMaxPenalty(
                 dt=self.config.ctrl_dt,
                 delta_max_j=tuple(float(x) for x in self.delta_max_j),
-                scale=-0.005,
+                scale=-0.003,
                 norm="l2",
                 scale_by_curriculum=True,
             ),
+            #ksim.ActionAccelerationPenalty(
+            #    scale=-0.005,
+            #    scale_by_curriculum=True,
+            #),
+            ksim.JointVelocityPenalty(
+                scale=-5.0,
+                scale_by_curriculum=True,
+            ),
+            #ksim.MinActionStepPenalty(
+            #    threshold=math.radians(1.0),   # no moves smaller than 1°
+            #    scale=-1.3,                    # tune so this term lives in the same ballpark
+            #    scale_by_curriculum=True,
+            #),
+             # encourage *real* steps ≥2°
+            #ksim.ActionDeltaHingePenalty(
+            #    threshold=math.radians(2.0),
+            #    scale=-2.0,           # tune so hinge term sums ~100–200
+            #    squared=True,
+            #    scale_by_curriculum=True,
+            #),
             ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
@@ -815,8 +934,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             key,
             num_inputs=NUM_ACTOR_INPUTS,
             num_outputs=NUM_JOINTS,
-            min_std=0.01,
-            max_std=1.0,
+            min_std=0.001,
+            max_std=0.1,
             hidden_size=self.config.hidden_size,
             num_mixtures=self.config.num_mixtures,
             depth=self.config.depth,
@@ -1007,9 +1126,9 @@ if __name__ == "__main__":
             valid_every_n_steps=20,
             render_full_every_n_seconds=60,
             valid_first_n_steps=0,
-            only_save_most_recent=False,
+            only_save_most_recent=True,
             save_every_n_steps=50,
-            action_latency_range=(0.003, 0.01),
+            #action_latency_range=(0.003, 0.01),
             #actuator_update_dt=0.02,
 
         ),
