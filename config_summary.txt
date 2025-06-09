@@ -1,0 +1,116 @@
+================================================================================
+ZBOT WALKING TASK - CURRENT CONFIGURATION SUMMARY
+================================================================================
+
+TRAINING HYPERPARAMETERS:
+- Environments: 2048
+- Batch Size: 256  
+- PPO Passes: 4
+- Rollout Length: 8.0 seconds
+- Learning Rate: 3e-4
+- Max Grad Norm: 2.0
+- Adam Weight Decay: 1e-5
+
+SIMULATION PARAMETERS:
+- Physics dt: 0.001s (1000 Hz)
+- Control dt: 0.02s (50 Hz) 
+- Solver Iterations: 8
+- Line Search Iterations: 8
+
+NEURAL NETWORK ARCHITECTURE:
+- Actor Inputs: 43 (joint_pos[20] + joint_vel[20] + proj_gravity[3])
+- Critic Inputs: 476 (comprehensive state information)
+- Hidden Size: 128
+- RNN Depth: 5 layers (GRU cells)
+- Output Mixtures: 5 (Mixture of Gaussians)
+- Action Std: min=0.001, max=0.1, var_scale=1.0
+
+ACTUATOR CONFIGURATION (Feetech):
+- Action Noise: 0.01 (disabled - "none")
+- Torque Noise: 0.01 (disabled - "none") 
+- Uses trapezoidal velocity profile planning
+- Per-joint reachability constraints via delta_max
+
+ACTIVE REWARDS & SCALING:
+✓ StayAliveReward                    : +1.0
+✓ UprightReward                      : +0.5
+✓ AngularVelocityPenalty (x,y,z)     : -0.005  [curriculum scaled]
+✓ LinearVelocityPenalty (x,y,z)      : -0.005  [curriculum scaled]
+✓ AvoidLimitsPenalty                 : -0.01
+✓ ReachabilityPenalty                : -1.0    [squared, curriculum scaled]
+✓ JointPositionPenalty (to ZEROS)    : -0.25
+✓ ActionJerkDeltaMaxPenalty          : -0.003  [L2 norm, curriculum scaled]
+✓ JointVelocityPenalty               : -5.0    [curriculum scaled]
+
+DISABLED REWARDS:
+✗ NaiveForwardReward                 : commented out
+✗ ActionAccelerationPenalty          : commented out  
+✗ MinActionStepPenalty               : commented out
+✗ ActionDeltaHingePenalty            : commented out
+
+ACTIVE TERMINATIONS:
+✓ BadZTermination                    : z ∈ [0.05, 0.5] meters
+
+DISABLED TERMINATIONS:
+✗ PitchTooGreatTermination           : commented out (was ±30°)
+✗ RollTooGreatTermination            : commented out (was ±30°)
+✗ HighVelocityTermination            : commented out
+✗ FarFromOriginTermination           : commented out (was 10m)
+
+ACTIVE PHYSICS RANDOMIZERS:
+✓ StaticFrictionRandomizer           : default scaling
+✓ ArmatureRandomizer                 : default scaling  
+✓ AllBodiesMassMultiplicationRandomizer : scale ∈ [0.95, 1.15]
+✓ JointDampingRandomizer             : default scaling
+✓ JointZeroPositionRandomizer        : ±4° (±0.0698 rad)
+✓ FloorFrictionRandomizer            : scale ∈ [0.3, 1.5]
+✓ IMUAlignmentRandomizer             : tilt_std=5°, yaw_std=1°, translate_std=5mm
+
+ACTIVE RESETS:
+✓ RandomJointPositionReset           : ZEROS positions ± 10% scale
+✓ RandomJointVelocityReset           : default scaling
+✓ RandomHeadingReset                 : default scaling
+
+DISABLED EVENTS:
+✗ PushEvent                          : commented out (was x/y=0.1, z=0.05 linvel)
+
+CURRICULUM:
+✓ LinearCurriculum                   : step_size=0.1, every 10 epochs
+
+OBSERVATION NOISE LEVELS:
+- JointPositionObservation           : ±0.05 rad (±2.9°)
+- JointVelocityObservation           : ±0.1 rad/s (±5.7°/s)
+- ProjectedGravityObservation        : 0.2 + 10% dropout + 0.5x scaling
+- IMU Accelerometer                  : 0.5 noise
+- IMU Gyroscope                      : ±10° (±0.175 rad) noise
+- ProjectedGravity lag               : 0-20ms range
+
+TARGET JOINT POSITIONS (ZEROS):
+- Hip Yaw (L/R)         : 0.0 rad
+- Hip Roll (R/L)        : ∓0.122 rad (∓7°)  
+- Hip Pitch (L/R)       : -0.140 rad (-8°)
+- Knee Pitch (L/R)      : -0.279 rad (-16°)
+- Ankle Pitch (L/R)     : -0.192 rad (-11°)
+- Ankle Roll (R/L)      : ∓0.096 rad (∓5.5°)
+- Shoulder Pitch (L/R)  : ±0.2 rad (±11.5°)
+- Shoulder Roll (L/R)   : ±0.175 rad (±10°)
+- Elbow/Gripper Roll    : 0.0 rad
+
+ACTOR OBSERVATION PREPROCESSING:
+- Joint positions: raw
+- Joint velocities: raw  
+- Projected gravity: 0.5x scale + 10% random dropout
+
+CRITIC OBSERVATION PREPROCESSING:
+- Joint velocities: /10.0 scaling
+- Actuator forces: /100.0 scaling
+- All other observations: raw
+
+CHECKPOINTING & LOGGING:
+- Save every: 60 seconds OR 50 steps
+- Validation every: 20 steps  
+- Render full every: 60 seconds
+- Only save most recent: True
+- Log every: 1 epoch
+
+================================================================================
