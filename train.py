@@ -473,49 +473,9 @@ class FeetechActuators(StatefulActuators):
             last_computed_torque=torque_j         # New computed torque
         )
 
-        #jax.debug.print("State carry: input_vel:{input_vel} output_vel:{output_vel}", 
-        #        input_vel=actuator_state.velocity[0],
-        #        output_vel=new_planner_state.velocity[0])
         # Add noise to torque
         torque_j_noisy = self.add_noise(self.torque_noise, self.torque_noise_type, torque_j, tor_rng)
 
-        def debug_print():
-            jax.debug.print(
-                "=== Joint 0 Debug (step {step}) ===\n"
-                "Positions: current:{current_pos:.6f} desired:{desired_pos:.6f} target:{target:.6f}\n"
-                "Velocities: current:{current_vel:.6f} desired:{desired_vel:.6f}\n"
-                "Errors: pos_err:{pos_error:.6f} vel_err:{vel_error:.6f}\n"
-                "Control: kp:{kp:.1f} kd:{kd:.3f} err_gain:{error_gain:.3f}\n"
-                "PWM: raw_duty:{raw_duty:.6f} clipped_duty:{duty:.6f}\n"
-                "Output: volts:{volts:.3f} torque:{torque:.3f}\n"
-                "Dt: {dt:.6f}\n"
-                "Planner state: pos:{planner_pos:.6f} vel:{planner_vel:.6f}",
-                step=self.debug_counter,
-                current_pos=current_pos_j[0],
-                desired_pos=desired_position[0],
-                target=action[0],
-                current_vel=current_vel_j[0],
-                desired_vel=desired_velocity[0],
-                pos_error=pos_error_j[0],
-                vel_error=vel_error_j[0],
-                kp=self.kp_j[0],
-                kd=self.kd_j[0],
-                error_gain=self.error_gain_j[0],
-                raw_duty=raw_duty_j[0],
-                duty=duty_j[0],
-                volts=volts_j[0],
-                torque=torque_j[0],
-                dt=self.dt,
-                planner_pos=planner_state.position[0],
-                planner_vel=planner_state.velocity[0],
-            )
-
-        #self.debug_counter += 1
-        #jax.lax.cond(
-        #    (self.debug_counter % 100 == 0) & (jnp.abs(pos_error_j[0]) > 0.001),
-        #    debug_print,
-        #    lambda: None
-        #)
         return torque_j_noisy, new_planner_state
 
     def get_default_action(self, physics_data: PhysicsData) -> Array:
@@ -683,17 +643,19 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.FloorFrictionRandomizer.from_geom_name(
                 model=physics_model, floor_geom_name="floor", scale_lower=0.3, scale_upper=1.5
             ),
+            # 1σ ≈ 1.5°, gives ~99.7% within 4.5°
+            # enable yaw randomization with 1σ ≈ 1°
+            # 5mm standard deviation
             ksim.IMUAlignmentRandomizer(
-                site_name="imu_site", 
-                tilt_std_rad=math.radians(5),           # 1σ ≈ 1.5°, gives ~99.7% within 4.5°
-                yaw_std_rad=math.radians(1.0),          # enable yaw randomization with 1σ ≈ 1°
-                translate_std_m=0.005                   # 5mm standard deviation
+                site_name="imu_site",
+                tilt_std_rad=math.radians(5),
+                yaw_std_rad=math.radians(1.0),
+                translate_std_m=0.005
             )
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
-        return [] #disable push events
-        #return [
+        return [
         #    ksim.PushEvent(
         #        x_linvel=0.1,
         #        y_linvel=0.1,
@@ -704,7 +666,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         #        vel_range=(0.05, 0.15),
         #        interval_range=(2.0, 4.0)
         #    ),
-        #]
+        ]
 
     def get_resets(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reset]:
         return [
@@ -789,46 +751,11 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 names=[name for name, _ in ZEROS],
                 scale=-0.1,
             ),
-
-
-
-            #ksim.ActionJerkDeltaMaxPenalty(
-            #    dt=self.config.ctrl_dt,
-            #    delta_max_j=tuple(float(x) for x in self.delta_max_j),
-            #    scale=-0.003,
-            #    norm="l2",
-            #    scale_by_curriculum=True,
-            #),
-            #ksim.ActionAccelerationPenalty(
-            #    scale=-0.005,
-            #    scale_by_curriculum=True,
-            #),
-            #ksim.JointVelocityPenalty(
-            #    scale=-5.0,
-            #    scale_by_curriculum=True,
-            #),
-            #ksim.MinActionStepPenalty(
-            #    threshold=math.radians(1.0),   # no moves smaller than 1°
-            #    scale=-1.3,                    # tune so this term lives in the same ballpark
-            #    scale_by_curriculum=True,
-            #),
-             # encourage *real* steps ≥2°
-            #ksim.ActionDeltaHingePenalty(
-            #    threshold=math.radians(2.0),
-            #    scale=-2.0,           # tune so hinge term sums ~100–200
-            #    squared=True,
-            #    scale_by_curriculum=True,
-            #),
             ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
             ksim.BadZTermination(unhealthy_z_lower=0.05, unhealthy_z_upper=0.5),
-            
-            # ksim.PitchTooGreatTermination(max_pitch=math.radians(30)),
-            # ksim.RollTooGreatTermination(max_roll=math.radians(30)),
-            # ksim.HighVelocityTermination(),
-            # ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
@@ -842,7 +769,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             key,
             num_inputs=NUM_ACTOR_INPUTS,
             num_outputs=NUM_JOINTS,
-            min_std=0.001,
+            min_std=0.01,
             max_std=1.0,
             hidden_size=self.config.hidden_size,
             num_mixtures=self.config.num_mixtures,
@@ -866,7 +793,8 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             mask = jax.random.bernoulli(key, p, x.shape)
             return jnp.where(mask, 0.0, x)
 
-        # Occasionally zeroing the gravity vector forces the policy to back‑up on joint encoders / base‑quat and stops it from keying on one cue
+        # Occasionally zeroing the gravity vector forces the policy to back‑up 
+        # on joint encoders / base‑quat and stops it from keying on one cue
         rng, sub = jax.random.split(rng)
         proj_grav_3 = maybe_drop(proj_grav_3, p=0.10, key=sub) # drop 10% of the time
 
@@ -998,16 +926,6 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         )
 
         action_j = action_dist_j.mode() if argmax else action_dist_j.sample(seed=rng)
-
-
-        # We are not using the planner envelope‑aware mapping
-        # --- planner envelope‑aware mapping ----------
-        # 1. Convert unbounded raw actions to [-1, 1] with tanh
-        #delta_norm_j = jnp.tanh(action_j)
-        # 2. Scale by per‑joint reachability and add to current position
-        #qpos_j = physics_state.data.qpos[7:]           # current joint angles
-        #target_j = qpos_j + delta_norm_j * self.delta_max_j
-        # -------------------------------------------------
 
         return ksim.Action(
             action=action_j,
