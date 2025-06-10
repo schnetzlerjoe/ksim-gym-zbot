@@ -11,7 +11,7 @@ from kinfer.export.jax import export_fn
 from kinfer.export.serialize import pack
 from kinfer.rust_bindings import PyModelMetadata
 
-from train import ZbotWalkingTask, Model
+from train import Model, ZbotWalkingTask
 
 
 def main() -> None:
@@ -60,7 +60,7 @@ def main() -> None:
             command,
         ]
 
-        #if task.config.use_acc_gyro:
+        # if task.config.use_acc_gyro:
         #    obs_components.extend([accelerometer, gyroscope])
 
         obs = jnp.concatenate(obs_components, axis=-1)
