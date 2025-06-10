@@ -2,7 +2,6 @@
 
 import argparse
 from pathlib import Path
-from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -10,19 +9,9 @@ import ksim
 from jaxtyping import Array
 from kinfer.export.jax import export_fn
 from kinfer.export.serialize import pack
+from kinfer.rust_bindings import PyModelMetadata
 
 from train import Model, ZbotWalkingTask
-
-
-def make_export_model(model: Model) -> Callable:
-    def model_fn(obs: Array, carry: Array) -> tuple[Array, Array]:
-        dist, carry = model.actor.forward(obs, carry)
-        return dist.mode(), carry
-
-    def batched_model_fn(obs: Array, carry: Array) -> tuple[Array, Array]:
-        return jax.vmap(model_fn)(obs, carry)
-
-    return batched_model_fn
 
 
 def main() -> None:
@@ -41,9 +30,11 @@ def main() -> None:
     mujoco_model = task.get_mujoco_model()
     joint_names = ksim.get_joint_names_in_order(mujoco_model)[1:]  # Removes the root joint.
 
+    # TODO: Don't hardcode this.
+    num_commands: int = 3
+
     # Constant values.
     carry_shape = (task.config.depth, task.config.hidden_size)
-    num_joints = len(joint_names)
 
     @jax.jit
     def init_fn() -> Array:
@@ -54,45 +45,41 @@ def main() -> None:
         joint_angles: Array,
         joint_angular_velocities: Array,
         projected_gravity: Array,
-        # accelerometer: Array,
-        # gyroscope: Array,
+        accelerometer: Array,
+        gyroscope: Array,
+        command: Array,
+        time: Array,
         carry: Array,
     ) -> tuple[Array, Array]:
-        obs = jnp.concatenate(
-            [
-                joint_angles,
-                joint_angular_velocities,
-                projected_gravity,
-                # accelerometer,
-                # gyroscope,
-            ],
-            axis=-1,
-        )
+        obs_components = [
+            jnp.sin(time),
+            jnp.cos(time),
+            joint_angles,
+            joint_angular_velocities,
+            projected_gravity,
+            command,
+        ]
+
+        # if task.config.use_acc_gyro:
+        #    obs_components.extend([accelerometer, gyroscope])
+
+        obs = jnp.concatenate(obs_components, axis=-1)
+
         dist, carry = model.actor.forward(obs, carry)
         return dist.mode(), carry
 
-    init_onnx = export_fn(
-        model=init_fn,
-        num_joints=num_joints,
-        carry_shape=carry_shape,
-    )
-
-    step_onnx = export_fn(
-        model=step_fn,
-        num_joints=num_joints,
-        carry_shape=carry_shape,
-    )
-
-    kinfer_model = pack(
-        init_fn=init_onnx,
-        step_fn=step_onnx,
+    metadata = PyModelMetadata(
         joint_names=joint_names,
-        carry_shape=carry_shape,
+        num_commands=num_commands,
+        carry_size=list(carry_shape),
     )
+
+    init_onnx = export_fn(init_fn, metadata)
+    step_onnx = export_fn(step_fn, metadata)
+    kinfer_model = pack(init_onnx, step_onnx, metadata)
 
     # Saves the resulting model.
     (output_path := Path(args.output_path)).parent.mkdir(parents=True, exist_ok=True)
-    print(f"Saving model to {output_path}")
     with open(output_path, "wb") as f:
         f.write(kinfer_model)
 

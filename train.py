@@ -1,4 +1,4 @@
-"""Defines simple task for training a walking policy for the default humanoid."""
+"""Walking task for ZBot."""
 
 import asyncio
 import logging
@@ -28,6 +28,17 @@ NUM_JOINTS = 20
 NUM_ACTOR_INPUTS = 43
 NUM_CRITIC_INPUTS = 476
 
+
+def get_servo_deadband() -> tuple[float, float]:
+    """Get deadband values based on current servo configuration."""
+    encoder_resolution = 0.087 * jnp.pi / 180  # radians
+
+    pos_deadband = 2 * encoder_resolution
+    neg_deadband = 2 * encoder_resolution
+
+    return pos_deadband, neg_deadband
+
+
 # These are in the order of the neural network outputs.
 ZEROS: list[tuple[str, float]] = [
     ("right_hip_yaw", 0.0),
@@ -43,11 +54,11 @@ ZEROS: list[tuple[str, float]] = [
     ("left_ankle_pitch", 0.0),
     ("left_ankle_roll", 0.0),
     ("left_shoulder_pitch", 0.0),
-    ("left_shoulder_roll", 0.5),
+    ("left_shoulder_roll", 0.0),
     ("left_elbow_roll", 0.0),
     ("left_gripper_roll", 0.0),
     ("right_shoulder_pitch", 0.0),
-    ("right_shoulder_roll", -0.5),
+    ("right_shoulder_roll", 0.0),
     ("right_elbow_roll", 0.0),
     ("right_gripper_roll", 0.0),
 ]
@@ -58,6 +69,7 @@ ZEROS: list[tuple[str, float]] = [
 class PlannerState:
     position: Array
     velocity: Array
+    last_computed_torque: Array
 
 
 @attrs.define(frozen=True, kw_only=True)
@@ -160,8 +172,8 @@ class Actor(eqx.Module):
         # Softplus and clip to ensure positive standard deviations.
         std_nm = jnp.clip((jax.nn.softplus(std_nm) + self.min_std) * self.var_scale, max=self.max_std)
 
-        # Apply bias to the means.
-        mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
+        # Comment out because we now sample deltas not absolute positions
+        # mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
 
         dist_n = ksim.MixtureOfGaussians(means_nm=mean_nm, stds_nm=std_nm, logits_nm=logits_nm)
 
@@ -318,31 +330,63 @@ class FeetechParams(TypedDict):
 
 
 def trapezoidal_step(
-    state: PlannerState, target_position: Array, dt: float
+    state: PlannerState,
+    target_position: Array,
+    dt: float,
+    v_max: Array,
+    a_max: Array,
+    positive_deadband: float,
+    negative_deadband: float,
 ) -> tuple[PlannerState, tuple[Array, Array]]:
-    v_max = 5.0
-    a_max = 39.0
-
     position_error = target_position - state.position
-    direction = jnp.sign(position_error)
 
-    stopping_distance = (state.velocity**2) / (2 * a_max)
+    # Determine which deadband to use based on error direction
+    deadband_threshold = jnp.where(position_error >= 0, positive_deadband, negative_deadband)
 
-    # Decide accelerate or decelerate
-    should_accelerate = jnp.abs(position_error) > stopping_distance
+    in_deadband = jnp.abs(position_error) <= deadband_threshold
 
-    acceleration = jnp.where(should_accelerate, direction * a_max, -direction * a_max)
-    new_velocity = state.velocity + acceleration * dt
+    # Deadband behavior: gradually decay velocity
+    decay_factor = 0.8  # Tunable parameter - could be measured from real servo
+    deadband_velocity = state.velocity * decay_factor
+    deadband_position = state.position + deadband_velocity * dt
 
-    # Clamp velocity
-    new_velocity = jnp.clip(new_velocity, -v_max, v_max)
+    # Planning behavior: normal trapezoidal planning
+    target_direction = jnp.sign(position_error)
 
-    # Prevent overshoot when decelerating
-    new_velocity = jnp.where(direction * new_velocity < 0, 0.0, new_velocity)
+    # Calculate stopping distance for current velocity
+    stopping_distance = jnp.abs(state.velocity**2) / (2 * a_max)
 
-    new_position = state.position + new_velocity * dt
+    # Check if velocity is aligned with target direction
+    velocity_direction = jnp.sign(state.velocity)
+    moving_towards_target = velocity_direction * target_direction >= 0
 
-    new_state = PlannerState(position=new_position, velocity=new_velocity)
+    should_accelerate = jnp.logical_and(moving_towards_target, jnp.abs(position_error) > stopping_distance)
+
+    # Choose acceleration
+    acceleration = jnp.where(
+        should_accelerate,
+        target_direction * a_max,  # Accelerate towards target
+        -velocity_direction * a_max,  # Decelerate (oppose current velocity)
+    )
+
+    # Handle zero velocity case
+    acceleration = jnp.where(
+        jnp.abs(state.velocity) < 1e-6,
+        target_direction * a_max,
+        acceleration,  # If stopped, accelerate towards target
+    )
+
+    planning_velocity = state.velocity + acceleration * dt
+    planning_velocity = jnp.clip(planning_velocity, -v_max, v_max)
+    planning_position = state.position + planning_velocity * dt
+
+    # Use element-wise where to select behavior for each joint
+    new_velocity = jnp.where(in_deadband, deadband_velocity, planning_velocity)
+    new_position = jnp.where(in_deadband, deadband_position, planning_position)
+
+    new_state = PlannerState(
+        position=new_position, velocity=new_velocity, last_computed_torque=state.last_computed_torque
+    )
 
     return new_state, (new_position, new_velocity)
 
@@ -364,10 +408,10 @@ class FeetechActuators(StatefulActuators):
         amax_j: Array,
         error_gain_j: Array,
         dt: float,
-        action_noise: float = 0.0,
-        action_noise_type: NoiseType = "none",
-        torque_noise: float = 0.0,
-        torque_noise_type: NoiseType = "none",
+        action_noise: float = 0.005,
+        action_noise_type: NoiseType = "gaussian",
+        torque_noise: float = 0.02,
+        torque_noise_type: NoiseType = "gaussian",
     ) -> None:
         self.max_torque_j = max_torque_j
         self.kp_j = kp_j
@@ -386,6 +430,9 @@ class FeetechActuators(StatefulActuators):
         self.action_noise_type = action_noise_type
         self.torque_noise = torque_noise
         self.torque_noise_type = torque_noise_type
+        self.debug_counter = 0
+        self.positive_deadband = get_servo_deadband()[0]
+        self.negative_deadband = get_servo_deadband()[1]
 
     def get_stateful_ctrl(
         self,
@@ -401,7 +448,9 @@ class FeetechActuators(StatefulActuators):
         current_vel_j = physics_data.qvel[6:]
 
         planner_state = actuator_state
-        planner_state, (desired_position, desired_velocity) = trapezoidal_step(planner_state, action, self.dt)
+        planner_state, (desired_position, desired_velocity) = trapezoidal_step(
+            planner_state, action, self.dt, self.vmax_j, self.amax_j, self.positive_deadband, self.negative_deadband
+        )
 
         pos_error_j = desired_position - current_pos_j
         vel_error_j = desired_velocity - current_vel_j
@@ -414,26 +463,49 @@ class FeetechActuators(StatefulActuators):
         volts_j = duty_j * self.vin_j
         torque_j = volts_j * self.kt_j / self.r_j
 
+        new_planner_state = PlannerState(
+            position=planner_state.position,  # Updated by trapezoidal_step
+            velocity=planner_state.velocity,  # Updated by trapezoidal_step
+            last_computed_torque=torque_j,  # New computed torque
+        )
+
         # Add noise to torque
         torque_j_noisy = self.add_noise(self.torque_noise, self.torque_noise_type, torque_j, tor_rng)
 
-        return torque_j_noisy, planner_state
+        return torque_j_noisy, new_planner_state
 
     def get_default_action(self, physics_data: PhysicsData) -> Array:
         return physics_data.qpos[7:]
 
-    def get_default_state(self, initial_position: Array, initial_velocity: Array) -> PlannerState:
+    def get_default_state(
+        self, initial_position: Array, initial_velocity: Array, initial_last_computed_torque: Array
+    ) -> PlannerState:
         """Initialize the planner state with the provided position and velocity."""
-        return PlannerState(position=initial_position, velocity=initial_velocity)
+        return PlannerState(
+            position=initial_position, velocity=initial_velocity, last_computed_torque=initial_last_computed_torque
+        )
 
     def get_initial_state(self, physics_data: PhysicsData, rng: PRNGKeyArray) -> PlannerState:
         """Implement abstract method to initialize planner state from physics data."""
         initial_position = physics_data.qpos[7:]
         initial_velocity = physics_data.qvel[6:]
-        return self.get_default_state(initial_position, initial_velocity)
+        initial_last_computed_torque = jnp.zeros_like(initial_position)
+        return self.get_default_state(initial_position, initial_velocity, initial_last_computed_torque)
+
+
+@attrs.define(frozen=True, kw_only=True)
+class FeetechTorqueObservation(ksim.Observation):
+    """Observation that returns the actual computed Feetech torque."""
+
+    def observe(self, state: ksim.ObservationInput, curriculum_level: Array, rng: PRNGKeyArray) -> Array:
+        # Simply return the torque that was computed by the actuator
+        actuator_state = state.physics_state.actuator_state
+        return actuator_state.last_computed_torque
 
 
 class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
+    delta_max_j: jnp.ndarray | None = None  # set later in get_actuators
+
     def get_optimizer(self) -> optax.GradientTransformation:
         optimizer = optax.chain(
             optax.clip_by_global_norm(self.config.max_grad_norm),
@@ -533,6 +605,10 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 raise ValueError(f"Joint '{name}' has no kd specified in metadata")
             kd.append(float(kd_str))
 
+        # Reachability vector -- Δmax = v max · Δt  +  ½ a max · Δt²
+        delta_max = jnp.array(vmax) * self.config.ctrl_dt + 0.5 * jnp.array(amax) * self.config.ctrl_dt**2
+        self.delta_max_j = delta_max
+
         # ------------------------------------------------------------------
         # 4. Instantiate controller (lists → jnp.array on‑the‑fly)
         # ------------------------------------------------------------------
@@ -549,47 +625,60 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             amax_j=jnp.array(amax),
             error_gain_j=jnp.array(err_gain),
             dt=self.config.dt,
-            action_noise=0.0,
+            action_noise=0.01,
             action_noise_type="none",
-            torque_noise=0.0,
+            torque_noise=0.01,
             torque_noise_type="none",
         )
 
     def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
         return [
-            ksim.StaticFrictionRandomizer(),
-            ksim.ArmatureRandomizer(),
-            ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.05),
-            ksim.JointDampingRandomizer(),
-            ksim.JointZeroPositionRandomizer(scale_lower=math.radians(-2), scale_upper=math.radians(2)),
+            # ksim.StaticFrictionRandomizer(),
+            # ksim.ArmatureRandomizer(),
+            # ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.15),
+            # ksim.JointDampingRandomizer(),
+            # ksim.JointZeroPositionRandomizer(scale_lower=math.radians(-2), scale_upper=math.radians(2)),
+            # ksim.FloorFrictionRandomizer.from_geom_name(
+            #     model=physics_model, floor_geom_name="floor", scale_lower=0.3, scale_upper=1.5
+            # ),
+            # # 1σ ≈ 1.5°, gives ~99.7% within 4.5°
+            # # enable yaw randomization with 1σ ≈ 1°
+            # # 5mm standard deviation
+            # ksim.IMUAlignmentRandomizer(
+            #     site_name="imu_site",
+            #     tilt_std_rad=math.radians(5),
+            #     yaw_std_rad=math.radians(1.0),
+            #     translate_std_m=0.005
+            # )
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
         return [
-            ksim.PushEvent(
-                x_force=1.0,  # velocity in m/s
-                y_force=1.0,
-                z_force=0.1,
-                force_range=(0.01, 0.5),
-                x_angular_force=0.1,  # angular velocity in rad/s
-                y_angular_force=0.1,
-                z_angular_force=0.5,
-                interval_range=(0.5, 4.0),
-            ),
+            #    ksim.PushEvent(
+            #        x_linvel=0.1,
+            #        y_linvel=0.1,
+            #        z_linvel=0.05,
+            #        x_angvel=0.0,  # angular velocity in rad/s
+            #        y_angvel=0.0,
+            #        z_angvel=0.0,
+            #        vel_range=(0.05, 0.15),
+            #        interval_range=(2.0, 4.0)
+            #    ),
         ]
 
     def get_resets(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reset]:
         return [
-            ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
-            ksim.RandomJointVelocityReset(),
-            ksim.RandomHeadingReset(),
+            # ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
+            # ksim.RandomJointVelocityReset(),
+            # ksim.RandomHeadingReset(),
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
-        return [
-            ksim.JointPositionObservation(noise=math.radians(2)),
-            ksim.JointVelocityObservation(noise=math.radians(10)),
+        obs_list = [
+            ksim.JointPositionObservation(noise=math.radians(0.00)),
+            ksim.JointVelocityObservation(noise=math.radians(0.0)),
             ksim.ActuatorForceObservation(),
+            FeetechTorqueObservation(),
             ksim.CenterOfMassInertiaObservation(),
             ksim.CenterOfMassVelocityObservation(),
             ksim.BasePositionObservation(),
@@ -601,7 +690,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.ProjectedGravityObservation.create(
                 physics_model=physics_model,
                 framequat_name="imu_site_quat",
-                lag_range=(0.0, 0.1),
+                lag_range=(0.0, 0.05),
                 noise=math.radians(1),
             ),
             ksim.ActuatorAccelerationObservation(),
@@ -613,37 +702,48 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.SensorObservation.create(
                 physics_model=physics_model,
                 sensor_name="imu_acc",
-                noise=1.0,
+                noise=0.5,
             ),
             ksim.SensorObservation.create(
                 physics_model=physics_model,
                 sensor_name="imu_gyro",
-                noise=math.radians(10),
+                noise=math.radians(0),
             ),
         ]
 
+        # Add action-position observation for each joint
+        obs_list.extend(
+            [
+                ksim.ActPosObservation.create(
+                    physics_model=physics_model,
+                    joint_name=joint_name,
+                )
+                for joint_name, _ in ZEROS
+            ]
+        )
+
+        return obs_list
+
     def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
-        return []
+        return [
+            ksim.JoystickCommand(
+                sample_probs=(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),  # Always "stand still" during training
+            ),
+        ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
-            # Standard rewards.
             ksim.StayAliveReward(scale=1.0),
-            ksim.UprightReward(scale=0.1),
-            # ksim.NaiveForwardReward(clip_min=0.0, clip_max=0.5, scale=1.0),
-            # Avoid movement penalties.
-            ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
-            ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005),
-            # Normalization penalties.
-            # ksim.ActionInBoundsReward.create(physics_model, scale=0.01),
-            ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            # ksim.ActionNearPositionPenalty(joint_threshold=math.radians(2.0), scale=-0.01),
-            ksim.JointVelocityPenalty(scale=-0.01, scale_by_curriculum=True),
-            # ksim.ActionSmoothnessPenalty(scale=-0.01),
-            # ksim.ActuatorRelativeForcePenalty.create(physics_model, scale=-0.01),
-            # # Bespoke rewards.
-            # BentArmPenalty.create_penalty(physics_model, scale=-0.1),
-            # StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
+            ksim.UprightReward(scale=1.0),
+            # ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            # ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            # ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
+            # ksim.ReachabilityPenalty(
+            #     delta_max_j=tuple(float(x) for x in self.delta_max_j),
+            #     scale=-1.0,
+            #     squared=True,
+            #     scale_by_curriculum=True,
+            # ),
             JointPositionPenalty.create_from_names(
                 physics_model=physics_model,
                 names=[name for name, _ in ZEROS],
@@ -654,15 +754,11 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
             ksim.BadZTermination(unhealthy_z_lower=0.05, unhealthy_z_upper=0.5),
-            # ksim.PitchTooGreatTermination(max_pitch=math.radians(30)),
-            # ksim.RollTooGreatTermination(max_roll=math.radians(30)),
-            # ksim.HighVelocityTermination(),
-            # ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         return ksim.LinearCurriculum(
-            step_size=0.01,
+            step_size=0.0,
             step_every_n_epochs=10,
         )
 
@@ -684,10 +780,20 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         observations: xax.FrozenDict[str, Array],
         commands: xax.FrozenDict[str, Array],
         carry: Array,
+        rng: PRNGKeyArray,
     ) -> tuple[distrax.Distribution, Array]:
         joint_pos_n = observations["joint_position_observation"]
         joint_vel_n = observations["joint_velocity_observation"]
         proj_grav_3 = observations["projected_gravity_observation"]
+
+        def maybe_drop(x: Array, p: float, key: PRNGKeyArray) -> Array:
+            mask = jax.random.bernoulli(key, p, x.shape)
+            return jnp.where(mask, 0.0, x)
+
+        # Occasionally zeroing the gravity vector forces the policy to back‑up
+        # on joint encoders / base‑quat and stops it from keying on one cue
+        rng, sub = jax.random.split(rng)
+        proj_grav_3 = maybe_drop(proj_grav_3, p=0.0, key=sub)  # don't drop for now
 
         obs_n = jnp.concatenate(
             [
@@ -745,16 +851,20 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         model_carry: tuple[Array, Array],
         rng: PRNGKeyArray,
     ) -> tuple[ksim.PPOVariables, tuple[Array, Array]]:
+        step_keys = jax.random.split(rng, trajectory.action.shape[0])
+
         def scan_fn(
             actor_critic_carry: tuple[Array, Array],
-            transition: ksim.Trajectory,
+            scan_inputs: tuple[ksim.Trajectory, PRNGKeyArray],
         ) -> tuple[tuple[Array, Array], ksim.PPOVariables]:
+            transition, step_key = scan_inputs
             actor_carry, critic_carry = actor_critic_carry
             actor_dist, next_actor_carry = self.run_actor(
                 model=model.actor,
                 observations=transition.obs,
                 commands=transition.command,
                 carry=actor_carry,
+                rng=step_key,
             )
             log_probs = actor_dist.log_prob(transition.action)
             assert isinstance(log_probs, Array)
@@ -778,7 +888,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
             return next_carry, transition_ppo_variables
 
-        next_model_carry, ppo_variables = jax.lax.scan(scan_fn, model_carry, trajectory)
+        next_model_carry, ppo_variables = jax.lax.scan(scan_fn, model_carry, (trajectory, step_keys))
 
         return ppo_variables, next_model_carry
 
@@ -800,13 +910,14 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         argmax: bool,
     ) -> ksim.Action:
         actor_carry_in, critic_carry_in = model_carry
-
+        rng, actor_rng = jax.random.split(rng)
         # Runs the actor model to get the action distribution.
         action_dist_j, actor_carry = self.run_actor(
             model=model.actor,
             observations=observations,
             commands=commands,
             carry=actor_carry_in,
+            rng=actor_rng,
         )
 
         action_j = action_dist_j.mode() if argmax else action_dist_j.sample(seed=rng)
@@ -833,8 +944,8 @@ if __name__ == "__main__":
             ls_iterations=8,
             # Checkpointing parameters.
             save_every_n_seconds=60,
-            valid_every_n_steps=20,
-            render_full_every_n_seconds=60,
+            valid_every_n_steps=5,
+            render_full_every_n_seconds=10,
             valid_first_n_steps=1,
         ),
     )
