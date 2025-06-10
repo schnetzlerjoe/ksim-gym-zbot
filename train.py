@@ -635,23 +635,23 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
     def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
         return [
-            ksim.StaticFrictionRandomizer(),
-            ksim.ArmatureRandomizer(),
-            ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.15),
-            ksim.JointDampingRandomizer(),
-            ksim.JointZeroPositionRandomizer(scale_lower=math.radians(-2), scale_upper=math.radians(2)),
-            ksim.FloorFrictionRandomizer.from_geom_name(
-                model=physics_model, floor_geom_name="floor", scale_lower=0.3, scale_upper=1.5
-            ),
-            # 1σ ≈ 1.5°, gives ~99.7% within 4.5°
-            # enable yaw randomization with 1σ ≈ 1°
-            # 5mm standard deviation
-            ksim.IMUAlignmentRandomizer(
-                site_name="imu_site",
-                tilt_std_rad=math.radians(5),
-                yaw_std_rad=math.radians(1.0),
-                translate_std_m=0.005
-            )
+            # ksim.StaticFrictionRandomizer(),
+            # ksim.ArmatureRandomizer(),
+            # ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.15),
+            # ksim.JointDampingRandomizer(),
+            # ksim.JointZeroPositionRandomizer(scale_lower=math.radians(-2), scale_upper=math.radians(2)),
+            # ksim.FloorFrictionRandomizer.from_geom_name(
+            #     model=physics_model, floor_geom_name="floor", scale_lower=0.3, scale_upper=1.5
+            # ),
+            # # 1σ ≈ 1.5°, gives ~99.7% within 4.5°
+            # # enable yaw randomization with 1σ ≈ 1°
+            # # 5mm standard deviation
+            # ksim.IMUAlignmentRandomizer(
+            #     site_name="imu_site",
+            #     tilt_std_rad=math.radians(5),
+            #     yaw_std_rad=math.radians(1.0),
+            #     translate_std_m=0.005
+            # )
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
@@ -670,15 +670,15 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
     def get_resets(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reset]:
         return [
-            ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
-            ksim.RandomJointVelocityReset(),
-            ksim.RandomHeadingReset(),
+            # ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
+            # ksim.RandomJointVelocityReset(),
+            # ksim.RandomHeadingReset(),
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
         obs_list = [
-            ksim.JointPositionObservation(noise=math.radians(0.05)),
-            ksim.JointVelocityObservation(noise=math.radians(0.1)),
+            ksim.JointPositionObservation(noise=math.radians(0.00)),
+            ksim.JointVelocityObservation(noise=math.radians(0.0)),
             ksim.ActuatorForceObservation(),
             FeetechTorqueObservation(),
             ksim.CenterOfMassInertiaObservation(),
@@ -709,7 +709,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
             ksim.SensorObservation.create(
                 physics_model=physics_model,
                 sensor_name="imu_gyro",
-                noise=math.radians(10),
+                noise=math.radians(0),
             ),
             
         ]
@@ -734,17 +734,17 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
             ksim.StayAliveReward(scale=1.0),
-            ksim.UprightReward(scale=0.3),
-            ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
-            ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            ksim.UprightReward(scale=1.0),
+            # ksim.AngularVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
+            # ksim.LinearVelocityPenalty(index=("x", "y", "z"), scale=-0.005,scale_by_curriculum=True),
 
-            ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            ksim.ReachabilityPenalty(
-                delta_max_j=tuple(float(x) for x in self.delta_max_j),
-                scale=-1.0,
-                squared=True,
-                scale_by_curriculum=True,
-            ),
+            # ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
+            # ksim.ReachabilityPenalty(
+            #     delta_max_j=tuple(float(x) for x in self.delta_max_j),
+            #     scale=-1.0,
+            #     squared=True,
+            #     scale_by_curriculum=True,
+            # ),
 
             JointPositionPenalty.create_from_names(
                 physics_model=physics_model,
@@ -760,7 +760,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         return ksim.LinearCurriculum(
-            step_size=0.1,
+            step_size=0.0,
             step_every_n_epochs=10,
         )
 
@@ -796,7 +796,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         # Occasionally zeroing the gravity vector forces the policy to back‑up 
         # on joint encoders / base‑quat and stops it from keying on one cue
         rng, sub = jax.random.split(rng)
-        proj_grav_3 = maybe_drop(proj_grav_3, p=0.10, key=sub) # drop 10% of the time
+        proj_grav_3 = maybe_drop(proj_grav_3, p=0.0, key=sub) # don't drop for now
 
         obs_n = jnp.concatenate(
             [
@@ -949,8 +949,8 @@ if __name__ == "__main__":
             ls_iterations=8,
             # Checkpointing parameters.
             save_every_n_seconds=60,
-            valid_every_n_steps=20,
-            render_full_every_n_seconds=60,
+            valid_every_n_steps=5,
+            render_full_every_n_seconds=10,
             valid_first_n_steps=1,
         ),
     )
