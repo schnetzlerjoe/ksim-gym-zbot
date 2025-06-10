@@ -1,4 +1,4 @@
-"""Walking task for ZBot"""
+"""Walking task for ZBot."""
 
 import asyncio
 import logging
@@ -30,11 +30,11 @@ NUM_CRITIC_INPUTS = 476
 
 
 def get_servo_deadband() -> tuple[float, float]:
-    """Get deadband values based on current servo configuration"""
-    ENCODER_RESOLUTION = 0.087 * jnp.pi / 180  # radians
+    """Get deadband values based on current servo configuration."""
+    encoder_resolution = 0.087 * jnp.pi / 180  # radians
 
-    pos_deadband = 2 * ENCODER_RESOLUTION
-    neg_deadband = 2 * ENCODER_RESOLUTION
+    pos_deadband = 2 * encoder_resolution
+    neg_deadband = 2 * encoder_resolution
 
     return pos_deadband, neg_deadband
 
@@ -786,7 +786,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
         joint_vel_n = observations["joint_velocity_observation"]
         proj_grav_3 = observations["projected_gravity_observation"]
 
-        def maybe_drop(x, p, key):
+        def maybe_drop(x: Array, p: float, key: PRNGKeyArray) -> Array:
             mask = jax.random.bernoulli(key, p, x.shape)
             return jnp.where(mask, 0.0, x)
 
