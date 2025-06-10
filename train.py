@@ -333,8 +333,8 @@ def trapezoidal_step(
     state: PlannerState,
     target_position: Array,
     dt: float,
-    v_max: float,
-    a_max: float,
+    v_max: Array,
+    a_max: Array,
     positive_deadband: float,
     negative_deadband: float,
 ) -> tuple[PlannerState, tuple[Array, Array]]:
