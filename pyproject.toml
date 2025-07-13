@@ -1,3 +1,19 @@
+[project]
+name = "ksim-gym-zbot"
+version = "0.1.0"
+description = "KSIM Gym ZBot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ksim",
+    "mujoco-scenes",
+    "kinfer[jax]",
+    "jupyter",
+    "ipykernel",
+    "pre-commit",
+    "jax[cuda12]>=0.5.3",
+]
+
 [tool.black]
 
 line-length = 120

@@ -1767,12 +1767,12 @@ if __name__ == "__main__":
     ZbotWalkingTask.launch(
         ZbotWalkingTaskConfig(
             # Training parameters.
-            num_envs=2048,
-            batch_size=256,
+            num_envs=512,  # Reduced from 2048 to fit in GPU memory
+            batch_size=128,  # Reduced from 256 to fit in GPU memory
             learning_rate=1e-3,
             num_passes=4,
             epochs_per_log_step=1,
-            rollout_length_seconds=8.0,
+            rollout_length_seconds=4.0,  # Reduced from 8.0 to fit in GPU memory
             # Simulation parameters.
             dt=0.001,
             ctrl_dt=0.02,
